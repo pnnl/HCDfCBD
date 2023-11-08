@@ -5,7 +5,7 @@ A non-variational version of Deep-IMV.  We just average the predictions of each 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Dict, Union, Any, cast
+from typing import List, Tuple
 
 class simple_FC(nn.Module):
     def __init__(self, input_size: int, hidden_sizes: List[int], prediction_dim: int, dropout: float = 0.2):
@@ -22,7 +22,7 @@ class simple_FC(nn.Module):
         self.fc_out = nn.Linear(hidden_sizes[-1], prediction_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         h = F.relu(self.fc1(x))
 
@@ -43,7 +43,7 @@ class JointMLP(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: List[torch.Tensor]):
+    def forward(self, x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
 
         yhats = []
@@ -71,7 +71,7 @@ class JointMLP(nn.Module):
 
         return yhat, h, yhats, hiddens
     
-    def loss(self, y, yhat, yhats, alpha = 0.5, **kwargs):
+    def loss(self, y, yhat, yhats, focal=True, gamma=2., alpha=None, **kwargs) -> torch.Tensor:
         """ Compute the total loss for all the joint and marginal models
 
         Args:
@@ -83,21 +83,22 @@ class JointMLP(nn.Module):
             torch.Tensor: The joint loss
         """
 
-        product_loss = F.cross_entropy(yhat, y)
+        product_loss = F.cross_entropy(yhat, y, reduction='none')
+        marginal_losses = [F.cross_entropy(yh, y, reduction='none') for yh in yhats]
 
-        # if alpha is not None:
-        #     alpha = alpha.repeat(yhat.shape[0], 1).to(yhat.device)
-        #     alpha = alpha.gather(1, y.view(-1, 1))
-        #     ce = ce * alpha.view(-1)
+        if alpha is not None:
+            alpha = alpha.repeat(yhat.shape[0], 1).to(yhat.device)
+            alpha = alpha.gather(1, y.view(-1, 1))
+            product_loss = product_loss * alpha.view(-1)
+            marginal_losses = [m * alpha.view(-1) for m in marginal_losses]
 
-        # if focal:
-        #     focal_loss = torch.pow(1 - yhat.gather(1, y.view(-1, 1)), gamma).view(-1) * ce
-        #     focal_loss = focal_loss.sum()
-        #     return torch.mean(focal_loss + var_beta * kl)
-        # else:
-        #     ce = ce.sum()
-        #     return torch.mean(ce + var_beta * kl)  
+        if focal:
+            product_loss = torch.pow(1 - yhat.gather(1, y.view(-1, 1)), gamma).view(-1) * product_loss
+            marginal_losses = [torch.pow(1 - yh.gather(1, y.view(-1, 1)), gamma).view(-1) * m for yh, m in zip(yhats, marginal_losses)]
+        
+        # import pdb; pdb.set_trace()
+        product_loss = torch.mean(product_loss)
+        marginal_losses = [torch.mean(m) for m in marginal_losses]
 
-        marginal_losses = [F.cross_entropy(yh, y) for yh in yhats]
+        return product_loss + sum(marginal_losses)
     
-        return alpha * product_loss + (1-alpha) * sum(marginal_losses)

@@ -39,7 +39,7 @@ class FC_Marginal(nn.Module):
         
         return out, dist
 
-def product_of_experts(dists):
+def product_of_experts(dists, eps=1e-8):
     """ Compute the mean and variance of the product of N normal distributions each having a N(mu_i, S_i) distribution with a N(mu_0, S_0) prior.  The covariance matrix and mean of the product of experts is given by:
 
     cov_poe = (1/S_0 + sum_i (1/S_i) )^-1
@@ -60,10 +60,10 @@ def product_of_experts(dists):
         var_ = dist.variance
         mu_ = dist.mean
 
-        var_poe = var_poe + torch.div(1., var_)
-        mu_poe = mu_poe + torch.div(mu_, var_)
+        var_poe = var_poe + torch.div(1., var_ + eps)
+        mu_poe = mu_poe + torch.div(mu_, var_ + eps)
 
-    var_poe = torch.div(1., var_poe)
+    var_poe = torch.div(1., var_poe + eps)
     mu_poe = torch.mul(mu_poe, var_poe)
 
     return Normal(mu_poe, var_poe)
