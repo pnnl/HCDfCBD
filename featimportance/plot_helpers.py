@@ -3,6 +3,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import seaborn as sns
 import pandas as pd
+import numpy as np
 
 def make_igrad_plot_df(rank_df, raw_data_df, num_biomols = 10, id_vars = "Name", var_name = "SampleID", value_name = "Input_value", score_name = "IGrad_value"):
     """Create a long plotting df from a dataframe of scores and a dataframe of raw data
