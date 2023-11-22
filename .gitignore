@@ -35,6 +35,11 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
+
+# text files
+*.csv
+data/
 
 # IPython
 profile_default/

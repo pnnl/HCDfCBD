@@ -4,11 +4,18 @@ from decimal import Decimal as D
 
 def overlap_sets(setA, setB, M, verbose=True):
     """
-    Accepts to lists
-    M is the population size (previously N)
-    n is the number of successes in the population 
-    N is the sample size (previously n)
-    x is still the number of drawn “successes”
+    Compute the probability that the sets setA and setB were generated from independent processes via a hypergeometric distribution.
+
+    Args:
+        setA (set): A set of elements
+        setB (set): A set of elements
+        M (int): The size of the population
+        verbose (bool, optional): Whether to print the results. Defaults to True.
+
+    Returns:
+        pdensity (float): The probability density at x, the number of elements in the intersection of setA and setB
+        cdf (float): The cumulative density at x.
+        sf (float): The upper tail probability, the probability that the intersection of setA and setB is greater than or equal to x.
     """
     n= len(setA)
     N= len(setB)

@@ -5,7 +5,29 @@ from torch.distributions import kl_divergence, Normal
 from typing import List, Tuple, Dict, Union, Any, cast
 
 class FC_Marginal(nn.Module):
+    """A simple MLP for a single view of the multi-view model.
+
+    Attributes:
+        input_size (int): The number of input features
+        hidden_sizes (List[int]): The number of hidden units in each layer
+        z_dim (int): The dimensionality of the latent representation
+        prediction_dim (int): The number of output classes
+        dropout (float, optional): The dropout rate. Defaults to 0.2.
+        fc1 (nn.Linear): The first fully connected layer after the input
+        fc{j} (nn.Linear): The j-th fully connected layer after the input layer
+        fc_z (nn.Linear): The fully connected layer that maps the last hidden layer to the parameters for the latent distribution
+        fc_out (nn.Linear): The layer that maps the (sampled) latent representation to the output classes
+    """
     def __init__(self, input_size: int, hidden_sizes: List[int], z_dim: int, prediction_dim: int, dropout: float = 0.2):
+        """Initialize the FC_Marginal model
+
+        Args:
+            input_size (int): The number of input features
+            hidden_sizes (List[int]): The number of hidden units in each layer
+            z_dim (int): The dimensionality of the latent representation
+            prediction_dim (int): The number of output classes
+            dropout (float, optional): The dropout rate. Defaults to 0.2.
+        """
         super().__init__()
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
@@ -22,7 +44,6 @@ class FC_Marginal(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
         h = F.relu(self.fc1(x))
 
         for sz in range(1, len(self.hidden_sizes)):
@@ -69,7 +90,25 @@ def product_of_experts(dists, eps=1e-8):
     return Normal(mu_poe, var_poe)
 
 class JointVAE(nn.Module):
+    """
+    A simple MLP for a single view of the multi-view model.
+
+    Attributes:
+        margin_models (List[FC_Marginal]): The list of marginal models of class FC_Marginal
+        hidden_dim (int): The number of hidden units between fc1 and fc2.
+        dropout (float, optional): The dropout rate. Defaults to 0.2.
+        fc1 (nn.Linear): The first fully connected layer after the output.
+        fc2 (nn.Linear): The second fully connected layer after fc1.
+    """
     def __init__(self, marginal_models: List[FC_Marginal], hidden_dim: int = 128, dropout: float = 0.2):
+        """
+        Initialize the JointVAE model
+
+        Args:
+            marginal_models (List[FC_Marginal]): The list of marginal models of class FC_Marginal
+            hidden_dim (int, optional): The number of hidden units between fc1 and fc2. Defaults to 128.
+            dropout (float, optional): The dropout rate. Defaults to 0.2.
+        """
         super().__init__()
         self.margin_models = torch.nn.ModuleList(marginal_models)
         self.fc1 = nn.Linear(self.margin_models[0].z_dim, hidden_dim)
@@ -120,7 +159,7 @@ class JointVAE(nn.Module):
             poe_dist (torch.distributions.Normal): The distribution of the product of experts
             yhats (List[torch.Tensor]): List of softmax predictions for each marginal model
             dists (List[torch.distributions.Normal]): List of distributions for each marginal model
-            var_beta (float, optional): The weight of the KL divergence term. Defaults to 1..
+            kwargs: Additional arguments to pass to var_loss
 
         Returns:
             torch.Tensor: The joint loss

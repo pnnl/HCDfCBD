@@ -8,7 +8,28 @@ import torch.nn.functional as F
 from typing import List, Tuple
 
 class simple_FC(nn.Module):
+    """
+    A simple MLP for a single view of the multi-view model.
+
+    Attributes:
+        input_size (int): The number of input features
+        hidden_sizes (List[int]): The number of hidden units in each layer
+        prediction_dim (int): The number of output classes
+        dropout (float, optional): The dropout rate. Defaults to 0.2.
+        fc1 (nn.Linear): The first fully connected layer after the input
+        fc{j} (nn.Linear): The j-th fully connected layer after the input layer
+        fc_out (nn.Linear): The layer that maps the (sampled) latent representation to the output classes
+    """
     def __init__(self, input_size: int, hidden_sizes: List[int], prediction_dim: int, dropout: float = 0.2):
+        """
+        Initialize the FC_Marginal model
+
+        Args:
+            input_size (int): The number of input features
+            hidden_sizes (List[int]): The number of hidden units in each layer
+            prediction_dim (int): The number of output classes
+            dropout (float, optional): The dropout rate. Defaults to 0.2.
+        """
         super().__init__()
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
@@ -35,7 +56,24 @@ class simple_FC(nn.Module):
         return preds, h
     
 class JointMLP(nn.Module):
+    """
+    A model that fuses the predictions of multiple marginal models.
+
+    Attributes:
+        margin_models (torch.nn.ModuleList): A list of marginal models of type simple_FC
+        fc1 (nn.Linear): The first fully connected layer after the last hidden layer of the marginal models
+        fc2 (nn.Linear): The second fully connected layer, immediately after fc1
+        dropout (nn.Dropout): A dropout layer
+    """
     def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, dropout: float = 0.2):
+        """
+        Initialize the JointMLP model
+
+        Args:
+            marginal_models (List[simple_FC]): A list of marginal models of type simple_FC
+            hidden_dim (int, optional): The number of hidden units between fc1 and fc2. Defaults to 128.
+            dropout (float, optional): The dropout rate. Defaults to 0.2.
+        """
         super().__init__()
         self.margin_models = torch.nn.ModuleList(marginal_models)
         assert len(set([m.hidden_sizes[-1] for m in self.margin_models])) == 1, "All models must have the same last hidden size"

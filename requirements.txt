@@ -3,3 +3,5 @@ pandas
 sklearn
 torch==2.0.1
 shap
+seaborn
+matplotlib
