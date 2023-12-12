@@ -20,7 +20,7 @@ def make_igrad_plot_df(rank_df, raw_data_df, num_biomols = 10, id_vars = "Name",
     raw_data_df = raw_data_df.melt(id_vars = id_vars, var_name = var_name, value_name = value_name)
     raw_data_df = raw_data_df[raw_data_df[var_name].isin(rank_df.columns)]
     
-    tmp_df = rank_df.iloc[:10,]
+    tmp_df = rank_df.iloc[:num_biomols,]
     mycols = tmp_df.columns[:2].to_list()
     igrad_plot_df = tmp_df.melt(id_vars = mycols, var_name = var_name, value_name = score_name)
     
@@ -37,7 +37,8 @@ def igrad_beeswarm_plot(
     xlabel = "Integrated Gradient Scores",
     ylabel = "Lipids",
     title = "",
-    size = 4
+    size = 4,
+    use_stripplot = False
     ):
     """Make a beeswarm plot using the output from make_igrad_plot_df()
 
@@ -59,7 +60,8 @@ def igrad_beeswarm_plot(
     sns.set_style("whitegrid")
     sns.set_context("paper", font_scale=1.5)
     cpal = sns.color_palette(palette, 5, desat = 1.)
-    sns.swarmplot(x = xcol, y = ycol, hue = "bin", edgecolor='black', linewidth = 0.5, data = plot_df, size = size, palette = cpal, legend=None)
+    fn = sns.swarmplot if not use_stripplot else sns.stripplot
+    fn(x = xcol, y = ycol, hue = "bin", edgecolor='black', linewidth = 0.5, data = plot_df, size = size, palette = cpal, legend=None)
     # plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -74,3 +76,4 @@ def igrad_beeswarm_plot(
     plt.axvline(x=0, color = 'black', linestyle = '--', linewidth = 0.5)
 
     plt.show()
+    
