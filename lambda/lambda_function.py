@@ -15,6 +15,7 @@ import pandas as pd
 import copy
 import datetime
 import logging
+import os
 
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 
@@ -23,12 +24,27 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import seaborn as sns
 
+import argparse
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+## Dummy event object.  Passed as the 'data' field in curl
 
 # event['fmeta_sample_names'] = ['SampleID_proteomics', 'SampleID_lipidpos', 'SampleID_metab']
 # event['fmeta_target_name'] = "Virus"
 # event['edata_cnames'] = ['Metabolite', 'Name', "Protein"]
+
+# event = {
+#     "do_train": "true",
+#     "do_eval": "true",
+#     "fmeta_sample_names": ["SampleID_proteomics", "SampleID_lipidpos", "SampleID_metab"],
+#     "fmeta_target_name": "Virus",
+#     "edata_filenames": ["OMICS_ICL104_Metabolomics_YMK.csv", "ICL104_lipids_aligned_for_stats.csv", "ICL104_proteins_luke.csv"],
+#     "edata_cnames": ["Metabolite", "Name", "Protein"],
+#     "shapley": "true",
+#     "igrads": "true"
+# }
 
 def handler(event, context):
     logging.info("event: %s", event)
@@ -138,10 +154,10 @@ def handler(event, context):
             print(f'Iteration {i+1} loss: {loss.item():.3f}')
 
         # save the pytorch model
-        torch.save(joint_model.state_dict(), '/data/model.pt')
+        torch.save(joint_model.state_dict(), 'data/model.pt')
     else:
         # load the pytorch model
-        joint_model.load_state_dict(torch.load('/data/model.pt'))
+        joint_model.load_state_dict(torch.load('data/model.pt'))
 
     joint_model.eval()
 
@@ -161,8 +177,15 @@ def handler(event, context):
 
         CONFUSION_TEST = confusion_matrix(ytest_gt, ypred)
 
+        # dump eval results, just one line with the accuracy for now
+        with open('data/eval_results.txt', 'w') as f:
+            f.write(f"Model test accuracy: {ACC_TEST}\n")
+
+        # dump the confusion matrix
+        pd.DataFrame(CONFUSION_TEST).to_csv('data/confusion_matrix.csv', index=False)
+        
     # SHAPley values
-    if event.get('shapley', False) {
+    if event.get('shapley', False):
         joint_model_wrp = JointMLPWrapper(joint_model)
 
         # make the explainer object
@@ -199,11 +222,10 @@ def handler(event, context):
             tmp_df = tmp_df.merge(scores_df, how = 'left', left_on='feature', right_index=True)
             out_dataframes_shap.append(tmp_df)
             tmp_df.to_csv('data/shapley_values_{}.csv'.format(fname), index=False)
-    }
 
     # Integrated gradients
     # TODO:  Again, here I'm assuming binary classification, we'd need to examine each output dimension for multi-class.
-    if event.get('igrads', False) {
+    if event.get('igrads', False):
         baselines = [-torch.rand_like(el)/2 for el in all_data_tensors]
         baselines = [el[:, torch.randperm(el.shape[1])] for el in baselines]
 
@@ -252,6 +274,33 @@ def handler(event, context):
             fig.savefig('data/integrated_gradients_{}.png'.format(edata_cname), bbox_inches='tight')
             plt.close(fig)
 
+    return("success")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--do-train', action='store_true', help="whether to train the model from scratch")
+    parser.add_argument('--do-eval', action='store_true', help="whether to evaluate the model")
+    parser.add_argument('--fmeta-sample-names', nargs='*', default=["SampleID_proteomics", "SampleID_lipidpos", "SampleID_metab"], help="names of columns in fmeta.csv that correspond to the sample IDs in each of the edata files")
+    parser.add_argument('--fmeta-target-name', default="Virus", help="name of the column in fmeta.csv that contains the target variable")
+    parser.add_argument('--edata-filenames', nargs='*', default=["OMICS_ICL104_Metabolomics_YMK.csv", "ICL104_lipids_aligned_for_stats.csv", "ICL104_proteins_luke.csv"], help="filenames of the edata files")
+    parser.add_argument('--edata-cnames', nargs='*', default=["Metabolite", "Name", "Protein"], help="names of the columns in the edata files that contain the biomolecule names")
+    parser.add_argument('--shapley', action='store_true', help="whether to compute SHAPley values and plot the result")
+    parser.add_argument('--igrads', action='store_true', help="whether to compute integrated gradients and plot the result")
+    args = parser.parse_args()
+
+    event = {
+        "do_train": args.do_train,
+        "do_eval": args.do_eval,
+        "fmeta_sample_names": args.fmeta_sample_names,
+        "fmeta_target_name": args.fmeta_target_name,
+        "edata_filenames": args.edata_filenames,
+        "edata_cnames": args.edata_cnames,
+        "shapley": args.shapley,
+        "igrads": args.igrads
     }
-    # igrad_plot_df = make_igrad_plot_df(out_dataframes_igrad[0], datas[0].reset_index(), num_biomols = 10, id_vars = "Metabolite", var_name = "SampleID", value_name = "Input_value")
+
+    handler(event, None)
+
+if __name__ == "__main__":
+    main()
     

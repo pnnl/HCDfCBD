@@ -1,0 +1,17 @@
+version: "3" 
+services:
+    lambda:
+        image: diomics:0.0.1
+        container_name: dataharm
+        ports:
+            - "9000:8080"
+        volumes:
+            - "/Users/clab683/git_repos/DeepIMV/data:/var/task/data"
+    minio:
+        profiles: ["minio"]
+        image: minio/minio
+        container_name: minio-dataharmony
+        ports:
+            - "9002:9000"
+            - "9003:9001"
+        command: server --console-address ":9001" /data

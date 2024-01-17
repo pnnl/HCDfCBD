@@ -71,7 +71,7 @@ def igrad_beeswarm_plot(
     norm = plt.Normalize(plot_df[raw_val_name].min(), plot_df[raw_val_name].max())
     sm =  cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
-    cbar = plt.colorbar(sm)
+    cbar = plt.colorbar(sm, ax=plt.gca())
 
     plt.axvline(x=0, color = 'black', linestyle = '--', linewidth = 0.5)
 
