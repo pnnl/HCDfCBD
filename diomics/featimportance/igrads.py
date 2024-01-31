@@ -17,7 +17,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1):
     grads = [torch.zeros_like(v) for v in baselines]
     for i in range(1, n_steps + 1):
         tmp = [torch.clone(b) for b in baselines]
-        tmp = [b + i * (vtest - b) for b, vtest in zip(tmp, views)]
+        tmp = [b + (i/n_steps) * (vtest - b) for b, vtest in zip(tmp, views)]
         tmp = [b.requires_grad_() for b in tmp]
         yhat, poe_dist, yhats, dists = model(tmp)
         yhat[:,class_idx].mean().backward()
