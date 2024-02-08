@@ -18,6 +18,7 @@ import logging
 import os
 
 from sklearn.metrics import roc_curve, auc, confusion_matrix
+from sklearn.model_selection import StratifiedShuffleSplit
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -25,6 +26,7 @@ import matplotlib.colors as mcolors
 import seaborn as sns
 
 import argparse
+from tqdm import tqdm
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -49,13 +51,15 @@ logger.setLevel(logging.INFO)
 def handler(event, context):
     logging.info("event: %s", event)
 
+    os.makedirs(event['output_dir'], exist_ok=True)
+
     # flags to do training and/or evaluation
     do_train = event.get('do_train', False)
     do_eval = event.get('do_eval', False)
     
     # get absolute paths of files in /data/edata
     edata_paths = [os.path.join("data/edata", path) for path in event['edata_filenames']]
-    fmeta_path = os.path.join("data/fmeta.csv")    
+    fmeta_path = os.path.join("data", event['fmeta_file_name'])    
 
     # load data
     datas = []
@@ -74,9 +78,6 @@ def handler(event, context):
     fmeta = pd.read_csv(fmeta_path)
     fmeta = fmeta[~fmeta[event['fmeta_sample_names']].isna().any(axis=1)]
 
-    # Placeholder for example DHS data TODO:  probably remove this unless we want them to be able to pass arguments to .replace()
-    fmeta[event['fmeta_target_name']] = fmeta[event['fmeta_target_name']].replace({'Cal[0-9]*': 'Cal'}, regex=True)
-
     for edata_cname, k in zip(event['edata_cnames'], range(len(datas))):
         datas[k] = datas[k].set_index(edata_cname)
         datas[k][datas[k] == 0] = np.nan
@@ -92,24 +93,44 @@ def handler(event, context):
         datas[k] = datas[k][tmp_inds]
         datas[k] = datas[k].apply(lambda row: row.fillna(row.mean()), axis=1)
 
-    # TODO:  Make this flexible, currently hard-coded for ICL-104 dataset
-    y = pd.Series(['Cal' if 'Cal04' in el else 'Mock' for el in datas[0].columns])
+        # remove rows with 
 
-    np.random.seed(1565)
-    cal_inds = np.random.choice(np.where(y == 'Cal')[0], int(np.sum(y == 'Cal') * 0.2))
-    mock_inds = np.random.choice(np.where(y == 'Mock')[0], int(np.sum(y == 'Mock') * 0.2))
-    test_inds = np.concatenate([cal_inds, mock_inds])
+    y = fmeta[event['fmeta_target_name']]
 
-    train_inds = np.isin(np.arange(y.shape[0]), test_inds) == False
+    ## Make sure their fmeta is valid, we should just require this up-front, but I'm fixing it here for now
+    has_all = pd.Series([True]*fmeta.shape[0])
+
+    # for k in range(len(datas)):
+    #     has_all = has_all & fmeta[event['fmeta_sample_names'][k]].isin(datas[k].columns)
+
+    # fmeta = fmeta[has_all]
+
+    # for k in range(len(datas)):
+    #     datas[k] = datas[k][fmeta[event['fmeta_sample_names'][k]]]
+
+    # y = y[has_all]
+
+    # get train-test split stratified by class
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=1565)
+    valid_splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=1555)
+
+    train_inds, test_inds = next(splitter.split(np.zeros(y.shape), y))
+    test_inds_new, valid_inds = next(valid_splitter.split(np.zeros(y.iloc[test_inds].shape), y.iloc[test_inds]))
+
+    valid_inds = test_inds[valid_inds]
+    test_inds = test_inds[test_inds_new]
 
     train_splits = {}
+    valid_splits = {}
     test_splits = {}
 
     for k in range(len(datas)):
         train_splits[k] = datas[k].iloc[:,train_inds]
+        valid_splits[k] = datas[k].iloc[:,valid_inds]
         test_splits[k] = datas[k].iloc[:,test_inds]
 
     ytrain = y.iloc[train_inds]
+    yvalid = y.iloc[valid_inds]
     ytest = y.iloc[test_inds]
 
     last_hidden_size = 64
@@ -126,16 +147,28 @@ def handler(event, context):
     optimizer = AdamW(joint_model.parameters(), lr=1e-4)
 
     tensors = {}
+    tensors_valid = {}
+
     for k in train_splits.keys():
         tensors[k] = torch.tensor(train_splits[k].values, dtype=torch.float32).T
+        tensors_valid[k] = torch.tensor(valid_splits[k].values, dtype=torch.float32).T
 
     y_gt = ytrain.astype('category').cat.codes
     y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+    y_gt_valid = yvalid.astype('category').cat.codes
+    y_gt_valid = torch.tensor(y_gt_valid.values, dtype=torch.int64)
 
     views = list(tensors.values())
+    views_valid = list(tensors_valid.values())
     
+    best_valid_loss = torch.tensor(torch.inf)
+    iter_no_improvement = 0
+
     if do_train:
-        for i in range(1500):
+        pbar = tqdm(range(5000))
+        valid_loss = torch.tensor(torch.inf)
+
+        for i in pbar:
             views = list(tensors.values())
 
             if np.random.rand() < 0.1:
@@ -151,13 +184,38 @@ def handler(event, context):
             torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
             optimizer.step()
 
-            print(f'Iteration {i+1} loss: {loss.item():.3f}')
+            # validation step
+            if i % 100 == 0 and i > 0:
+                joint_model.eval()
+
+                views_valid = list(tensors_valid.values())
+                yhat_valid, h_valid, yhats_valid, hiddens_valid = joint_model(views_valid)
+                valid_loss = joint_model.loss(y_gt_valid, yhat_valid, yhats_valid)
+
+                if valid_loss < best_valid_loss:
+                    best_valid_loss = valid_loss
+                    print(f'Validation loss improved, saving model')
+                    torch.save(joint_model.state_dict(), event['best_model_path'])
+
+                if valid_loss > best_valid_loss:
+                    iter_no_improvement += 1
+                else:
+                    iter_no_improvement = 0
+
+                if iter_no_improvement > 5:
+                    print(f'No improvement in validation loss for 500 iterations, stopping training')
+                    break
+
+                joint_model.train()
+
+            # set the tqdm message:
+            pbar.set_description(f'Iteration {i}, training loss: {loss.item():.3f} validation loss: {valid_loss.item():.3f} best validation loss: {best_valid_loss.item():.3f}')
 
         # save the pytorch model
-        torch.save(joint_model.state_dict(), 'data/model.pt')
+        torch.save(joint_model.state_dict(), event['final_model_path'])
     else:
         # load the pytorch model
-        joint_model.load_state_dict(torch.load('data/model.pt'))
+        joint_model.load_state_dict(torch.load(event['model_path']))
 
     joint_model.eval()
 
@@ -178,11 +236,11 @@ def handler(event, context):
         CONFUSION_TEST = confusion_matrix(ytest_gt, ypred)
 
         # dump eval results, just one line with the accuracy for now
-        with open('data/eval_results.txt', 'w') as f:
+        with open(os.path.join(event['output_dir'], 'eval_results.txt'), 'w') as f:
             f.write(f"Model test accuracy: {ACC_TEST}\n")
 
         # dump the confusion matrix
-        pd.DataFrame(CONFUSION_TEST).to_csv('data/confusion_matrix.csv', index=False)
+        pd.DataFrame(CONFUSION_TEST).to_csv(os.path.join(event['output_dir'], 'confusion_matrix.csv'), index=False)
         
     # SHAPley values
     if event.get('shapley', False):
@@ -202,7 +260,7 @@ def handler(event, context):
         for tmp_tensor, sv, fname in zip(all_data_tensors, shap_values[0], event['edata_filenames']):
             fig = plt.gcf()
             shap.summary_plot(sv, features=tmp_tensor, feature_names=datas[k].index, show=False)
-            fig.savefig('data/shap_summary_plot_{}.png'.format(fname))
+            fig.savefig(os.path.join(event['output_dir'], 'shap_summary_plot_{}.png'.format(fname)))
             plt.close(fig)
 
         abs_shap_values = [np.abs(el).sum(axis = 0) for el in shap_values[0]]
@@ -221,7 +279,7 @@ def handler(event, context):
 
             tmp_df = tmp_df.merge(scores_df, how = 'left', left_on='feature', right_index=True)
             out_dataframes_shap.append(tmp_df)
-            tmp_df.to_csv('data/shapley_values_{}.csv'.format(fname), index=False)
+            tmp_df.to_csv(os.path.join(event['output_dir'], 'shapley_values_{}.csv'.format(fname)), index=False)
 
     # Integrated gradients
     # TODO:  Again, here I'm assuming binary classification, we'd need to examine each output dimension for multi-class.
@@ -247,7 +305,7 @@ def handler(event, context):
 
             tmp_df = tmp_df.merge(scores_df, how = 'left', left_on='feature', right_index=True)
             out_dataframes_igrad.append(tmp_df)
-            tmp_df.to_csv('data/integrated_gradients_{}.csv'.format(fname), index=False)
+            tmp_df.to_csv(os.path.join(event['output_dir'], 'integrated_gradients_{}.csv'.format(fname)), index=False)
 
         # make the plots and dump them to disk
         for temp_df, tmp_data, edata_cname in zip(out_dataframes_igrad, datas, event['edata_cnames']):
@@ -271,7 +329,7 @@ def handler(event, context):
                 use_stripplot = True
             )
             plt.tight_layout()
-            fig.savefig('data/integrated_gradients_{}.png'.format(edata_cname), bbox_inches='tight')
+            fig.savefig(os.path.join(event['output_dir'], 'integrated_gradients_{}.png'.format(edata_cname)), bbox_inches='tight')
             plt.close(fig)
 
     return("success")
@@ -280,23 +338,32 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--do-train', action='store_true', help="whether to train the model from scratch")
     parser.add_argument('--do-eval', action='store_true', help="whether to evaluate the model")
-    parser.add_argument('--fmeta-sample-names', nargs='*', default=["SampleID_proteomics", "SampleID_lipidpos", "SampleID_metab"], help="names of columns in fmeta.csv that correspond to the sample IDs in each of the edata files")
+    parser.add_argument('--fmeta-file-name', default="fmeta.csv", help="name of the file containing the metadata")
+    parser.add_argument('--fmeta-sample-names', nargs='*', default=["SampleID_metab", "SampleID_proteomics", "SampleID_lipidpos"], help="names of columns in fmeta.csv that correspond to the sample IDs in each of the edata files")
     parser.add_argument('--fmeta-target-name', default="Virus", help="name of the column in fmeta.csv that contains the target variable")
     parser.add_argument('--edata-filenames', nargs='*', default=["OMICS_ICL104_Metabolomics_YMK.csv", "ICL104_lipids_aligned_for_stats.csv", "ICL104_proteins_luke.csv"], help="filenames of the edata files")
     parser.add_argument('--edata-cnames', nargs='*', default=["Metabolite", "Name", "Protein"], help="names of the columns in the edata files that contain the biomolecule names")
     parser.add_argument('--shapley', action='store_true', help="whether to compute SHAPley values and plot the result")
     parser.add_argument('--igrads', action='store_true', help="whether to compute integrated gradients and plot the result")
+    parser.add_argument('--output-dir', default="data/output", help="directory to save the output files")
+    parser.add_argument('--best-model-path', default="data/best_model.pt", help="path to save the model")
+    parser.add_argument('--final-model-path', default="data/final_model.pt", help="path to load the model")
+
     args = parser.parse_args()
 
     event = {
         "do_train": args.do_train,
         "do_eval": args.do_eval,
+        "fmeta_file_name": args.fmeta_file_name,
         "fmeta_sample_names": args.fmeta_sample_names,
         "fmeta_target_name": args.fmeta_target_name,
         "edata_filenames": args.edata_filenames,
         "edata_cnames": args.edata_cnames,
         "shapley": args.shapley,
-        "igrads": args.igrads
+        "igrads": args.igrads,
+        "output_dir": args.output_dir,
+        "best_model_path": args.best_model_path,
+        "final_model_path": args.final_model_path
     }
 
     handler(event, None)

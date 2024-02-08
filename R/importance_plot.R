@@ -65,6 +65,6 @@ importance_plot <- function(
         ggplot2::scale_color_viridis_c() + 
         ggplot2::theme_bw() + 
         ggplot2::labs(x = xlabel, y = ylabel, title = title)
-    
+
     return(p)
 }
