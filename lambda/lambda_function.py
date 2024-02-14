@@ -48,6 +48,105 @@ logger.setLevel(logging.INFO)
 #     "igrads": "true"
 # }
 
+def train_joint_model(
+    joint_model, tensors, y_gt, optimizer, event, do_validation = True, 
+    tensors_valid = None, y_gt_valid = None, max_iter = 5000, drop_view_prob = 0):
+
+    best_valid_loss = torch.tensor(torch.inf)
+    iter_no_improvement = 0
+
+    valid_loss_list = []
+    train_loss_list = []
+    pbar = tqdm(range(max_iter))
+    valid_loss = torch.tensor(torch.inf)
+    best_iter = 0
+    reduce_lr = True
+
+    for i in pbar:
+        views = list(tensors.values())
+
+        if np.random.rand() < drop_view_prob:
+            idx = np.random.randint(0, len(views))
+            views = [v if i != idx else None for i, v in enumerate(views)]
+
+        yhat, h, yhats, hiddens = joint_model(views)
+
+        loss, _, joint_loss = joint_model.loss(y_gt, yhat, yhats)
+
+        optimizer.zero_grad()
+        joint_loss.backward()
+        torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
+        optimizer.step()
+
+        # validation step
+        if do_validation and i % event['validation_frequency'] == 0 and i > 0:
+            assert tensors_valid is not None and y_gt_valid is not None, "Validation tensors and ground truth must be provided if do_validation is True"
+            joint_model.eval()
+
+            views_valid = list(tensors_valid.values())
+            yhat_valid, h_valid, yhats_valid, hiddens_valid = joint_model(views_valid)
+            valid_loss, _, _ = joint_model.loss(y_gt_valid, yhat_valid, yhats_valid)
+            valid_loss_list.append(valid_loss.item())
+
+            if valid_loss < best_valid_loss:
+                best_valid_loss = valid_loss
+                best_iter = i
+                print(f'Validation loss improved to {valid_loss.item()}, saving model')
+                torch.save(joint_model.state_dict(), event['best_model_path'])
+                iter_no_improvement = 0
+            else:
+                iter_no_improvement += 1
+
+            if iter_no_improvement > event['patience']:
+                if reduce_lr:
+                    print(f'No improvement in validation loss for {int(event["patience"] * event["validation_frequency"])} iterations, reducing learning rate')
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = param_group['lr'] * 0.25
+                    reduce_lr = False
+                    iter_no_improvement = 0
+                else:
+                    print(f'No improvement in validation loss for {int(event["patience"] * event["validation_frequency"])} iterations, stopping training')
+                    break
+
+            joint_model.train()
+
+        # set the tqdm message:
+        pbar.set_description(f'Iteration {i}, training loss: {loss.item():.3f} validation loss: {valid_loss.item():.3f} best validation loss: {best_valid_loss.item():.3f}')
+
+        train_loss_list.append(loss.item())
+
+    out = {
+        "joint_model": joint_model,
+        "valid_loss_list": valid_loss_list,
+        "train_loss_list": train_loss_list,
+        "n_iter": i,
+        "best_iter": best_iter + 1
+    }
+
+    return out
+
+def make_joint_model(event, datas, y):
+    last_hidden_size = 64
+    marginal_models = []
+    for k in range(len(datas)):
+        input_size = datas[k].shape[0]
+        marginal_models.append(simple_FC(input_size=input_size, hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique()))
+
+    # joint model
+    joint_model = JointMLP(marginal_models=marginal_models, hidden_dim=128)
+
+    return joint_model
+
+def plot_loss_curve(train_loss_list, valid_loss_list, out, event, ax):
+    ax.plot(train_loss_list, label='Training loss')
+    ax.plot([(i + 1)*event['validation_frequency'] for i in range(len(valid_loss_list))], valid_loss_list, label='Validation loss')
+    # draw a vertical line at the best iteration
+    ax.axvline(out['best_iter'], color='r', linestyle='--', label=f'Best validation loss {valid_loss_list[-1]:.3f} at iteration {out["best_iter"]}')
+
+    ax.set_xlabel('Iteration')
+    ax.set_ylabel('Loss')
+    ax.legend()
+
 def handler(event, context):
     logging.info("event: %s", event)
 
@@ -133,18 +232,11 @@ def handler(event, context):
     yvalid = y.iloc[valid_inds]
     ytest = y.iloc[test_inds]
 
-    last_hidden_size = 64
-
-    marginal_models = []
-    for k in range(len(datas)):
-        input_size = datas[k].shape[0]
-        marginal_models.append(simple_FC(input_size=input_size, hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique()))
-
     # joint model
-    joint_model = JointMLP(marginal_models=marginal_models, hidden_dim=128)
+    joint_model = make_joint_model(event, datas, y)
 
     # define optimizer
-    optimizer = AdamW(joint_model.parameters(), lr=1e-4)
+    optimizer = AdamW(joint_model.parameters(), lr=5e-5)
 
     tensors = {}
     tensors_valid = {}
@@ -158,65 +250,50 @@ def handler(event, context):
     y_gt_valid = yvalid.astype('category').cat.codes
     y_gt_valid = torch.tensor(y_gt_valid.values, dtype=torch.int64)
 
-    views = list(tensors.values())
-    views_valid = list(tensors_valid.values())
-    
-    best_valid_loss = torch.tensor(torch.inf)
-    iter_no_improvement = 0
-
     if do_train:
-        pbar = tqdm(range(5000))
-        valid_loss = torch.tensor(torch.inf)
+        out = train_joint_model(
+            joint_model, tensors, y_gt, optimizer, event, do_validation = True,
+            tensors_valid = tensors_valid, y_gt_valid = y_gt_valid, max_iter = event['max_iter']
+        )
 
-        for i in pbar:
-            views = list(tensors.values())
+        valid_loss_list = out['valid_loss_list']
+        train_loss_list = out['train_loss_list']
 
-            if np.random.rand() < 0.1:
-                idx = np.random.randint(0, len(views))
-                views = [v if i != idx else None for i, v in enumerate(views)]
+        # save loss curve
+        fig, ax = plt.subplots(figsize=(8, 6))
+        plot_loss_curve(train_loss_list, valid_loss_list, out, event, ax)
+        fig.savefig(os.path.join(event['output_dir'], 'loss_curve.png'))
 
-            yhat, h, yhats, hiddens = joint_model(views)
+        # train on the training + validation data
+        joint_model = make_joint_model(event, datas, y)
 
-            loss = joint_model.loss(y_gt, yhat, yhats)
+        optimizer = AdamW(joint_model.parameters(), lr=5e-5)
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
-            optimizer.step()
+        tensors = {}
 
-            # validation step
-            if i % 100 == 0 and i > 0:
-                joint_model.eval()
+        for k in train_splits.keys():
+            tensor_train = pd.concat(
+                [train_splits[k], valid_splits[k]], axis=1
+            )
 
-                views_valid = list(tensors_valid.values())
-                yhat_valid, h_valid, yhats_valid, hiddens_valid = joint_model(views_valid)
-                valid_loss = joint_model.loss(y_gt_valid, yhat_valid, yhats_valid)
+            tensors[k] = torch.tensor(tensor_train.values, dtype=torch.float32).T
 
-                if valid_loss < best_valid_loss:
-                    best_valid_loss = valid_loss
-                    print(f'Validation loss improved, saving model')
-                    torch.save(joint_model.state_dict(), event['best_model_path'])
+        y_gt = pd.concat([ytrain, yvalid]).astype('category').cat.codes
+        y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
 
-                if valid_loss > best_valid_loss:
-                    iter_no_improvement += 1
-                else:
-                    iter_no_improvement = 0
+        out = train_joint_model(
+            joint_model, tensors, y_gt, optimizer, event,
+            max_iter = out['best_iter'] + event['validation_frequency'], do_validation = False
+        )
 
-                if iter_no_improvement > 5:
-                    print(f'No improvement in validation loss for 500 iterations, stopping training')
-                    break
-
-                joint_model.train()
-
-            # set the tqdm message:
-            pbar.set_description(f'Iteration {i}, training loss: {loss.item():.3f} validation loss: {valid_loss.item():.3f} best validation loss: {best_valid_loss.item():.3f}')
+        joint_model = out['joint_model']
 
         # save the pytorch model
         torch.save(joint_model.state_dict(), event['final_model_path'])
     else:
         # load the pytorch model
         joint_model.load_state_dict(torch.load(event['model_path']))
-
+    
     joint_model.eval()
 
     if do_eval:
@@ -247,7 +324,7 @@ def handler(event, context):
         joint_model_wrp = JointMLPWrapper(joint_model)
 
         # make the explainer object
-        explainer = shap.DeepExplainer(joint_model_wrp, views)
+        explainer = shap.DeepExplainer(joint_model_wrp, list(tensors.values()))
 
         # make tensors of the whole dataset
         all_data_tensors = [torch.tensor(d.values, dtype=torch.float32).T for d in datas]
@@ -348,6 +425,10 @@ def main():
     parser.add_argument('--output-dir', default="data/output", help="directory to save the output files")
     parser.add_argument('--best-model-path', default="data/best_model.pt", help="path to save the model")
     parser.add_argument('--final-model-path', default="data/final_model.pt", help="path to load the model")
+    parser.add_argument('--patience', type=int, default=10, help="number of validation steps to wait for improvement in validation loss before stopping training")
+    parser.add_argument('--validation-frequency', type=int, default=100, help="number of training steps between validation steps")
+    parser.add_argument('--max-iter', type=int, default=5000, help="maximum number of training iterations")
+
 
     args = parser.parse_args()
 
@@ -363,7 +444,10 @@ def main():
         "igrads": args.igrads,
         "output_dir": args.output_dir,
         "best_model_path": args.best_model_path,
-        "final_model_path": args.final_model_path
+        "final_model_path": args.final_model_path,
+        "patience": args.patience,
+        "validation_frequency": args.validation_frequency,
+        "max_iter": args.max_iter
     }
 
     handler(event, None)

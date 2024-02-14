@@ -138,5 +138,5 @@ class JointMLP(nn.Module):
         product_loss = torch.mean(product_loss)
         marginal_losses = [torch.mean(m) for m in marginal_losses]
 
-        return product_loss + sum(marginal_losses)
+        return product_loss, marginal_losses, product_loss + sum(marginal_losses)
     
