@@ -1,0 +1,623 @@
+---
+title: Process the TCGA cancer data
+jupyter: python3
+---
+
+
+This notebook processes the TCGA dataset into a trainiable file format according to (Lee and van der Schaar, 2021).  At the end, we will have 4 'views' of the data:  Methylation, Proteomics, RNA-seq, and miRNA.  The features are reduced using kernel-pca.
+
+You will first need to scrape all the TCGA data using the `get_tcga.py` script.
+
+
+```{python}
+import os
+import subprocess
+
+import numpy as np
+import pandas as pd
+```
+
+```{python}
+tumor_list = [
+'ACC',
+'BLCA',
+'BRCA',
+'CESC',
+'CHOL',
+'COAD',
+'COADREAD',
+'DLBC',
+'ESCA',
+'FPPP',
+'GBM',
+'GBMLGG',
+'HNSC',
+'KICH',
+'KIPAN',
+'KIRC',
+'KIRP',
+'LAML',
+'LGG',
+'LIHC',
+'LUAD',
+'LUSC',
+'MESO',
+'OV',
+'PAAD',
+'PCPG',
+'PRAD',
+'READ',
+'SARC',
+'SKCM',
+'STAD',
+'STES',
+'TGCT',
+'THCA',
+'THYM',
+'UCEC',
+'UCS',
+'UVM']
+
+rnaseq_dir = "/Users/clab683/Data/tcga/rnaseq"
+os.makedirs(rnaseq_dir, exist_ok=True)
+
+rppa_dir = "/Users/clab683/Data/tcga/RPPA"
+os.makedirs(rppa_dir, exist_ok=True)
+
+mirna_dir = "/Users/clab683/Data/tcga/miRNA"
+os.makedirs(mirna_dir, exist_ok=True)
+
+methyl_dir = "/Users/clab683/Data/tcga/methylation"
+os.makedirs(methyl_dir, exist_ok=True)
+
+labels_dir = os.path.join("/Users/clab683/Data/tcga/clinical_labels/")
+os.makedirs(labels_dir, exist_ok=True)
+```
+
+# RPPA
+
+```{python}
+## 1. FIND SUPERSET OF RPPA FEATURES
+
+feat_list = {}
+for tumor in tumor_list:
+    basepath = os.path.join(
+        rppa_dir,
+        'gdac.broadinstitute.org_{}.RPPA_AnnotateWithGene.Level_3.2016012800.0.0'.format(tumor),
+    )
+    filename = '{}.rppa.txt'.format(tumor)
+
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        feat_list[tumor] = list(tmp)[1:]
+        
+        if tumor == 'ACC':
+            final_feat_list = feat_list[tumor].copy()
+            sup_feat_list   = feat_list[tumor].copy()
+        else:
+            final_feat_list = np.intersect1d(final_feat_list, feat_list[tumor])
+            sup_feat_list  += feat_list[tumor]
+            
+sup_feat_list = np.unique(sup_feat_list).tolist()
+            
+
+for tumor in tumor_list:
+    basepath = os.path.join(
+        mirna_dir,
+        'gdac.broadinstitute.org_{}.RPPA_AnnotateWithGene.Level_3.2016012800.0.0'.format(tumor),
+    )
+    filename = '{}.rppa.txt'.format(tumor)
+
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        tmp_ = pd.DataFrame([], columns=['Composite.Element.REF'] + sup_feat_list)
+        tmp_[['Composite.Element.REF'] + feat_list[tumor]] = tmp[['Composite.Element.REF'] + feat_list[tumor]]
+        
+        if tumor == 'ACC':
+#             final_df = tmp[['gene'] + final_feat_list.tolist()]
+            final_df = tmp_
+        else:
+#             final_df = pd.concat([final_df, tmp[['gene'] + final_feat_list.tolist()]], axis=0)
+            final_df = pd.concat([final_df, tmp_], axis=0)
+    
+final_df = final_df.drop_duplicates(subset=['Composite.Element.REF']).reset_index(drop=True)
+final_df.to_csv(os.path.join(rppa_dir, './RPPA_final.csv'), index=False)
+```
+
+# miRNA Seq
+
+```{python}
+## 1. FIND SUPERSET OF miRNASeq FEATURES
+
+feat_list = {}
+for tumor in tumor_list:
+    basepath = os.path.join(
+        mirna_dir,
+        'gdac.broadinstitute.org_{}.miRseq_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.miRseq_RPKM_log2.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        feat_list[tumor] = list(tmp)[1:]
+        
+        if tumor == 'ACC':
+            final_feat_list = feat_list[tumor].copy()
+            sup_feat_list   = feat_list[tumor].copy()
+        else:
+            final_feat_list = np.intersect1d(final_feat_list, feat_list[tumor])
+            sup_feat_list  += feat_list[tumor]
+            
+sup_feat_list = np.unique(sup_feat_list).tolist()
+
+for tumor in tumor_list:
+    basepath = os.path.join(
+        mirna_dir,
+        'gdac.broadinstitute.org_{}.miRseq_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.miRseq_RPKM_log2.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        tmp_ = pd.DataFrame([], columns=['gene'] + sup_feat_list)
+        tmp_[['gene'] + feat_list[tumor]] = tmp[['gene'] + feat_list[tumor]]
+        
+        if tumor == 'ACC':
+#             final_df = tmp[['gene'] + final_feat_list.tolist()]
+            final_df = tmp_
+        else:
+#             final_df = pd.concat([final_df, tmp[['gene'] + final_feat_list.tolist()]], axis=0)
+            final_df = pd.concat([final_df, tmp_], axis=0)
+            
+final_df = final_df.drop_duplicates(subset=['gene']).reset_index(drop=True)
+final_df.to_csv(os.path.join(mirna_dir, 'miRNAseq_RPKM_log2_final.csv'), index=False)
+```
+
+# METHYLATION
+
+```{python}
+## 1. FIND SUPERSET OF METHYLATION FEATURES
+
+feat_list = {}
+for tumor in tumor_list:
+    print("processing dataset {}".format(tumor))
+    basepath = os.path.join(
+        methyl_dir,
+        'gdac.broadinstitute.org_{}.Methylation_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.meth.by_mean.data.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+        tmp = tmp.iloc[1:, :].reset_index(drop=True)
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        feat_list[tumor] = list(tmp)[1:]
+            
+        if tumor == 'ACC':
+            final_feat_list = feat_list[tumor].copy()
+            sup_feat_list   = feat_list[tumor].copy()
+        else:
+            final_feat_list = np.intersect1d(final_feat_list, feat_list[tumor])
+            sup_feat_list  += feat_list[tumor]
+            
+sup_feat_list = np.unique(sup_feat_list).tolist()
+```
+
+```{python}
+
+for tumor in tumor_list:
+    print("assembling data for tumor: {}".format(tumor))
+    basepath = os.path.join(
+        methyl_dir,
+        'gdac.broadinstitute.org_{}.Methylation_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.meth.by_mean.data.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        tmp_ = pd.DataFrame([], columns=['Hybridization REF'] + sup_feat_list)
+        tmp_[['Hybridization REF'] + feat_list[tumor]] = tmp[['Hybridization REF'] + feat_list[tumor]]
+        
+        if tumor == 'ACC':
+#             final_df = tmp[['gene'] + final_feat_list.tolist()]
+            final_df = tmp_
+        else:
+#             final_df = pd.concat([final_df, tmp[['gene'] + final_feat_list.tolist()]], axis=0)
+            final_df = pd.concat([final_df, tmp_], axis=0)
+    
+    print(final_df.shape)
+
+final_df = final_df.drop_duplicates(subset=['Hybridization REF']).reset_index(drop=True)
+final_df.to_csv(os.path.join(methyl_dir, 'methylation_final.csv'), index=False)
+```
+
+# RNA-SEQ
+
+```{python}
+## 1. FIND SUPERSET OF RNASEQ FEATURES
+feat_list = {}
+for tumor in tumor_list:
+    print("processing dataset {}".format(tumor))
+    basepath = os.path.join(
+        rnaseq_dir,
+        'gdac.broadinstitute.org_{}.mRNAseq_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.uncv2.mRNAseq_RSEM_normalized_log2.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+        tmp = tmp.iloc[1:, :].reset_index(drop=True)
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        feat_list[tumor] = list(tmp)[1:]
+            
+        if tumor == 'ACC':
+            final_feat_list = feat_list[tumor].copy()
+            sup_feat_list   = feat_list[tumor].copy()
+        else:
+            final_feat_list = np.intersect1d(final_feat_list, feat_list[tumor])
+            sup_feat_list  += feat_list[tumor]
+            
+sup_feat_list = np.unique(sup_feat_list).tolist()
+```
+
+```{python}
+for tumor in tumor_list:
+    print("assembling data for tumor: {}".format(tumor))
+    basepath = os.path.join(
+        methyl_dir,
+        'gdac.broadinstitute.org_{}.mRNAseq_Preprocess.Level_3.2016012800.0.0/'.format(tumor),
+    )
+    filename = '{}.uncv2.mRNAseq_RSEM_normalized_log2.txt'.format(tumor)
+    fpath = os.path.join(basepath, filename)
+
+    if os.path.exists(fpath):
+        tmp = pd.read_csv(fpath, sep='\t')
+
+        tmp.columns = [list(tmp)[0]] + [f[:15] for f in list(tmp)[1:]]
+        tmp         = tmp.T.reset_index()
+        tmp.columns = tmp.iloc[0, 0:]
+        tmp         = tmp.iloc[1:, :].reset_index(drop=True)
+        
+        tmp_ = pd.DataFrame([], columns=['gene'] + sup_feat_list)
+        tmp_[['gene'] + feat_list[tumor]] = tmp[['gene'] + feat_list[tumor]]
+        
+        if tumor == 'ACC':
+#             final_df = tmp[['gene'] + final_feat_list.tolist()]
+            final_df = tmp_
+        else:
+#             final_df = pd.concat([final_df, tmp[['gene'] + final_feat_list.tolist()]], axis=0)
+            final_df = pd.concat([final_df, tmp_], axis=0)
+    
+    print(final_df.shape)
+
+final_df = final_df.drop_duplicates(subset=['gene']).reset_index(drop=True)
+final_df.to_csv(os.path.join(rnaseq_dir, 'rnaseq_final.csv'), index=False)
+```
+
+```{python}
+df_list = []
+
+for tumor in tumor_list:
+    print("adding labels for {}".format(tumor))
+    basepath = os.path.join(
+        labels_dir,
+        f'gdac.broadinstitute.org_{tumor}.Clinical_Pick_Tier1.Level_4.2016012800.0.0/',
+    )
+    filename = f'{tumor}.clin.merged.picked.txt'
+    fpath = os.path.join(basepath, filename)
+
+    tmp_ = pd.read_csv(fpath, sep='\t')
+    tmp_.set_index("Hybridization REF", inplace=True)
+
+    df_list.append(tmp_.T)
+```
+
+```{python}
+final_labels = pd.concat(df_list, axis=0)
+final_labels.shape
+```
+
+```{python}
+final_labels.index.name = "Hybridization REF"
+```
+
+```{python}
+final_labels.to_csv(os.path.join(labels_dir, 'labels_final.csv'), index=True, header=True)
+```
+
+```{python}
+label = pd.read_csv(os.path.join(labels_dir, 'labels_final.csv'), header=0)
+label
+```
+
+# MAKE MULTI-VIEW OBSERVATION FILE
+
+```{python}
+mRNAseq     = pd.read_csv(os.path.join(rnaseq_dir, './rnaseq_final.csv'))
+mRNAseq     = mRNAseq.drop_duplicates(subset=['gene']).reset_index(drop=True)
+mRNAseq     = mRNAseq.rename(columns={'gene':'Hybridization REF'})
+mRNAseq['Hybridization REF'] = mRNAseq['Hybridization REF'].apply(lambda x: x.lower()[:-3])
+
+RPPA        = pd.read_csv(os.path.join(rppa_dir, './RPPA_final.csv'))
+RPPA        = RPPA.rename(columns={'Composite.Element.REF':'Hybridization REF'})
+RPPA['Hybridization REF'] = RPPA['Hybridization REF'].apply(lambda x: x.lower()[:-3])
+
+methylation = pd.read_csv(os.path.join(methyl_dir, 'methylation_final.csv'))
+methylation['Hybridization REF'] = methylation['Hybridization REF'].apply(lambda x: x.lower()[:-3])
+
+miRNAseq    = pd.read_csv(os.path.join(mirna_dir, 'miRNAseq_RPKM_log2_final.csv'))
+miRNAseq     = miRNAseq.rename(columns={'gene':'Hybridization REF'})
+miRNAseq['Hybridization REF'] = miRNAseq['Hybridization REF'].apply(lambda x: x.lower()[:-3])
+```
+
+```{python}
+# mRNAseq.to_parquet(os.path.join(rnaseq_dir, './rnaseq_final.parquet'))
+# RPPA.to_parquet(os.path.join(rppa_dir, './RPPA_final.parquet'))
+# methylation.to_parquet(os.path.join(methyl_dir, './methylation_final.parquet'))
+# miRNAseq.to_parquet(os.path.join(mirna_dir, 'miRNAseq_RPKM_log2_final.parquet'))
+```
+
+```{python}
+mRNAseq      = mRNAseq.drop_duplicates(subset=['Hybridization REF'])
+RPPA         = RPPA.drop_duplicates(subset=['Hybridization REF'])
+methylation  = methylation.drop_duplicates(subset=['Hybridization REF'])
+miRNAseq     = miRNAseq.drop_duplicates(subset=['Hybridization REF'])
+
+tmp_list    = np.asarray(list(mRNAseq))
+mRNAseq     = mRNAseq[tmp_list[mRNAseq.isna().sum(axis=0) == 0]]
+
+tmp_list = np.asarray(list(RPPA))
+RPPA     = RPPA[tmp_list[RPPA.isna().sum(axis=0) == 0]]
+
+tmp_list    = np.asarray(list(methylation))
+methylation = methylation[tmp_list[methylation.isna().sum(axis=0) == 0]]
+
+tmp_list    = np.asarray(list(miRNAseq))
+miRNAseq    = miRNAseq[tmp_list[miRNAseq.isna().sum(axis=0) == 0]]
+```
+
+```{python}
+#label = pd.read_csv(os.path.join(labels_dir, 'labels_final.csv'), header=1)
+label = pd.read_csv(os.path.join(labels_dir, 'labels_final.csv'), header=0)
+label = label.sort_values(by='Hybridization REF').reset_index(drop=True)
+label = label[label['Hybridization REF'].apply(lambda x: 'tcga' in x)].drop_duplicates(subset=['Hybridization REF'], keep ='last').reset_index(drop=True)
+```
+
+```{python}
+label.loc[label['days_to_last_followup'] == 'endometrial', 'days_to_death']
+```
+
+```{python}
+label.loc[label['days_to_last_followup'] == 'endometrial', 'days_to_last_followup']
+```
+
+```{python}
+sum(label['days_to_last_followup'] == 'other  specify')
+```
+
+```{python}
+label.loc[label['days_to_last_followup'].astype(float) >= 365, '1yr-mortality']
+```
+
+```{python}
+'''
+ORIGINAL AUTHORS:
+    Some of the patients had shifted columns for some reason.
+    Manually corrected these errors.
+
+DANIEL CLABORNE:
+    I cant find any of these errors...
+'''
+
+label.loc[label['days_to_last_followup'] == 'endometrial', 'days_to_last_followup'] = label.loc[label['days_to_last_followup'] == 'endometrial', 'days_to_death']
+label.loc[label['days_to_last_followup'] == 'endometrial', 'days_to_death'] = label.loc[label['days_to_last_followup'] == 'endometrial', 'vital_status']
+label.loc[label['days_to_last_followup'] == 'endometrial', 'vital_status'] = label.loc[label['days_to_last_followup'] == 'endometrial', 'years_to_birth']
+
+label.loc[label['days_to_last_followup'] == 'other  specify', 'days_to_last_followup'] = label.loc[label['days_to_last_followup'] == 'other  specify', 'days_to_death']
+label.loc[label['days_to_last_followup'] == 'other  specify', 'days_to_death'] = label.loc[label['days_to_last_followup'] == 'other  specify', 'vital_status']
+label.loc[label['days_to_last_followup'] == 'other  specify', 'vital_status'] = label.loc[label['days_to_last_followup'] == 'other  specify', 'years_to_birth']
+
+label['1yr-mortality'] = -1.
+label.loc[label['days_to_last_followup'].astype(float) >= 365, '1yr-mortality'] = 0.
+label.loc[label['days_to_death'].astype(float) <= 365, '1yr-mortality'] = 1.
+
+label['3yr-mortality'] = -1.
+label.loc[label['days_to_last_followup'].astype(float) >= 3*365, '3yr-mortality'] = 0.
+label.loc[label['days_to_death'].astype(float) <= 3*365, '3yr-mortality'] = 1.
+
+label['5yr-mortality'] = -1.
+label.loc[label['days_to_last_followup'].astype(float) >= 5*365, '5yr-mortality'] = 0.
+label.loc[label['days_to_death'].astype(float) <= 5*365, '5yr-mortality'] = 1.
+```
+
+```{python}
+sum(cond3)
+```
+
+```{python}
+sum(cond1 * (label['days_to_death'].astype(float) <= 365))
+```
+
+```{python}
+cond1 = label['days_to_last_followup'].astype(float) >= 365
+cond2 = label['days_to_death'].astype(float) <= 3*365
+cond3 = label['days_to_death'].astype(float) <= 5*365
+
+sum(cond1 & (cond2 | cond3))
+```
+
+# Kernel PCA Dimensionality Reduction
+
+```{python}
+from sklearn.decomposition import PCA, SparsePCA, KernelPCA
+
+for view in ['RPPA', 'miRNAseq', 'Methylation', 'mRNAseq']:
+    print(view)
+    if view == 'mRNAseq':
+        df  = mRNAseq.copy(deep=True)
+        datadir = rnaseq_dir
+    elif view == 'miRNAseq':
+        df    = miRNAseq.copy(deep=True)
+        datadir = mirna_dir
+    elif view == 'Methylation':
+        df    = methylation.copy(deep=True)
+        datadir = methyl_dir
+    elif view == 'RPPA':
+        df    = RPPA.copy(deep=True)
+        datadir = rppa_dir
+
+    z_dim = 100
+
+    pca   = KernelPCA(kernel='poly', n_components=z_dim, random_state=1234)
+    z     =  pca.fit_transform(np.asarray(df.iloc[:, 1:]))
+
+    df_pca = pd.DataFrame(z, index=df['Hybridization REF']).reset_index()
+    df_pca.to_csv(os.path.join(datadir, '{}_kpca.csv'.format(view)), index=False)
+    
+# from sklearn.decomposition import PCA, SparsePCA, KernelPCA
+
+# for view in ['RPPA', 'miRNAseq', 'Methylation', 'mRNAseq']:
+#     print(view)
+#     if view == 'mRNAseq':
+#         df    = mRNAseq.copy(deep=True)
+#     elif view == 'miRNAseq':
+#         df    = miRNAseq.copy(deep=True)
+#     elif view == 'Methylation':
+#         df    = methylation.copy(deep=True)
+#     elif view == 'RPPA':
+#         df    = RPPA.copy(deep=True)
+
+#     z_dim = 100
+
+#     pca   = PCA(n_components=z_dim, random_state=1234)
+#     z     =  pca.fit_transform(np.asarray(df.iloc[:, 1:]))
+
+#     df_pca = pd.DataFrame(z, index=df['Hybridization REF']).reset_index()
+#     df_pca.to_csv('./FINAL/cleaned/{}_pca.csv'.format(view), index=False)
+    
+# from sklearn.decomposition import PCA, SparsePCA, KernelPCA
+
+# for view in ['RPPA', 'miRNAseq', 'Methylation', 'mRNAseq']:
+#     print(view)
+#     if view == 'mRNAseq':
+#         df    = mRNAseq.copy(deep=True)
+#     elif view == 'miRNAseq':
+#         df    = miRNAseq.copy(deep=True)
+#     elif view == 'Methylation':
+#         df    = methylation.copy(deep=True)
+#     elif view == 'RPPA':
+#         df    = RPPA.copy(deep=True)
+
+#     z_dim = 100
+
+#     pca   = SparsePCA(n_components=z_dim, random_state=1234)
+#     z     =  pca.fit_transform(np.asarray(df.iloc[:, 1:]))
+
+#     df_pca = pd.DataFrame(z, index=df['Hybridization REF']).reset_index()
+#     df_pca.to_csv('./FINAL/cleaned/{}_spca.csv'.format(view), index=False)
+```
+
+# CREATE MULTI-VIEW DATASET
+
+```{python}
+view = 'mRNAseq'
+df_pca1  = pd.read_csv(os.path.join(rnaseq_dir, '{}_kpca.csv'.format(view)))
+
+view = 'Methylation'
+df_pca2  = pd.read_csv(os.path.join(methyl_dir, '{}_kpca.csv'.format(view)))
+
+view = 'miRNAseq'
+df_pca3  = pd.read_csv(os.path.join(mirna_dir, '{}_kpca.csv'.format(view)))
+
+view = 'RPPA'
+df_pca4  = pd.read_csv(os.path.join(rppa_dir, '{}_kpca.csv'.format(view)))
+```
+
+### CREATE 1-Yr Mortality Dataset. (Censored samples are removed...)
+
+```{python}
+idx_list_y = label.loc[label['1yr-mortality'] != -1, 'Hybridization REF']
+
+idx_list1 = df_pca1['Hybridization REF']
+idx_list2 = df_pca2['Hybridization REF']
+idx_list3 = df_pca3['Hybridization REF']
+idx_list4 = df_pca4['Hybridization REF']
+
+idx_list_x = np.unique(idx_list1.tolist() + idx_list2.tolist() + idx_list3.tolist() + idx_list4.tolist())
+```
+
+```{python}
+idx_list     = np.intersect1d(idx_list_x, idx_list_y)
+df           = pd.DataFrame(idx_list, columns=['Hybridization REF'])  ##superset of samples that has at least one omics available.
+```
+
+### FINAL DATASET
+
+```{python}
+df1 = pd.merge(df, df_pca1, how='left', on='Hybridization REF')
+df2 = pd.merge(df, df_pca2, how='left', on='Hybridization REF')
+df3 = pd.merge(df, df_pca3, how='left', on='Hybridization REF')
+df4 = pd.merge(df, df_pca4, how='left', on='Hybridization REF')
+dfy = pd.merge(df, label[['Hybridization REF','1yr-mortality']], how='left', on='Hybridization REF')
+```
+
+```{python}
+np.savez(
+    '/Users/clab683/Documents/Data/tcga/multi_omics_1yr_mortality.npz',
+    mRNAseq     = np.asarray(df1.iloc[:, 1:]),
+    Methylation = np.asarray(df2.iloc[:, 1:]),
+    miRNAseq    = np.asarray(df3.iloc[:, 1:]),
+    RPPA        = np.asarray(df4.iloc[:, 1:]),
+    label       = np.asarray(dfy.iloc[:, 1:])
+)
+```
+

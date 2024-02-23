@@ -82,4 +82,14 @@ GitHub.sublime-settings
 !.vscode/launch.json 
 !.vscode/extensions.json 
 .history
+
 .Rproj.user
+.Rhistory
+*.Rproj
+
+*.rds
+*.R
+*.py
+*.txt
+
+docs/build

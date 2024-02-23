@@ -1,0 +1,780 @@
+---
+title: Example of a forward pass on fake data
+jupyter: python3
+---
+
+```{python}
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+from diomics.models.fc_imv import FC_Marginal, JointVAE
+
+import numpy as np
+import pandas as pd
+import copy
+
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+
+import matplotlib.pyplot as plt
+```
+
+
+
+```{python}
+# two arbitrary views, one with 1000 features, and another with 500 features
+marg_model1 = FC_Marginal(input_size=1000, hidden_sizes=[128, 128], z_dim=10, prediction_dim=10)
+marg_model2 = FC_Marginal(input_size=500, hidden_sizes=[64, 64], z_dim=10, prediction_dim=10)
+
+# joint model
+joint_model = JointVAE(marginal_models=[marg_model1, marg_model2], hidden_dim=128)
+
+# define optimizer
+optimizer = AdamW(joint_model.parameters(), lr=1e-3)
+```
+
+```{python}
+# fake inputs/targets
+example_input1 = torch.randn(100, 1000)
+example_input2 = torch.randn(100, 500)
+example_target = torch.randint(0, 10, (100,))
+```
+
+```{python}
+# get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
+yhat, poe_dist, yhats, dists = joint_model([example_input1, example_input2])
+```
+
+```{python}
+# pass the predictions and distributions to the loss function and update parameters
+loss = joint_model.loss(example_target, yhat, poe_dist, yhats, dists)
+loss.backward()
+```
+
+## Example with real data
+
+```{python}
+proData = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_proteins_luke.csv')
+lipData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/ICL104_lipids_aligned_for_stats.xlsx")
+metabData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/OMICS_ICL104_Metabolomics_YMK.xlsx")
+metabData = metabData.drop(columns=['KEGG', 'CAS', 'PubChem'])
+
+fmeta = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_fmeta.csv')
+```
+
+```{python}
+# significant biomolecules
+pro_anova = pd.read_csv("./data/anova_results/pep/anova_results.csv")
+lip_pos_anova = pd.read_csv("./data/anova_results/lip_pos/anova_results.csv")
+# lip_neg_anova = pd.read_csv("./data/anova_results/lip_neg/anova_results.csv")
+metab_anova = pd.read_csv("./data/anova_results/metab/anova_results.csv")
+```
+
+```{python}
+# some samples missing from some datasets.
+lipData.shape, metabData.shape, proData.shape|
+```
+
+```{python}
+# make the id column in the data the index
+lipData = lipData.set_index('Name')
+metabData = metabData.set_index('Metabolite')
+proData = proData.set_index('Protein')
+
+# replace zeros with NA
+lipData[lipData == 0] = np.nan
+metabData[metabData == 0] = np.nan
+
+# log2 transform the data and column-wise median center
+lipData = np.log2(lipData)
+metabData = np.log2(metabData)
+# proData = np.log2(proData) # already log 2
+
+lipData = lipData - lipData.median(axis=0)
+metabData = metabData - metabData.median(axis=0)
+proData = proData - proData.median(axis=0)
+
+# [0, 1] normalize all the data
+lipData = (lipData - np.min(lipData)) / (np.max(lipData) - np.min(lipData))
+metabData = (metabData - np.min(metabData)) / (np.max(metabData) - np.min(metabData))
+proData = (proData - np.min(proData)) / (np.max(proData) - np.min(proData))
+```
+
+```{python}
+# columns are nicely aligned
+y = pd.Series(['Cal' if 'Cal04' in el else 'Mock' for el in lipData.columns])
+```
+
+```{python}
+# drop indices with all null values
+lip_inds = (lipData.isnull() == False).sum(axis = 1) > 0
+metab_inds = (metabData.isnull() == False).sum(axis = 1) > 0
+pro_inds = (proData.isnull() == False).sum(axis = 1) > 0
+
+lipData = lipData[lip_inds]
+metabData = metabData[metab_inds]
+proData = proData[pro_inds]
+
+# impute the datasets with the row means
+lipData = lipData.apply(lambda row: row.fillna(row.mean()), axis=1)
+metabData = metabData.apply(lambda row: row.fillna(row.mean()), axis=1)
+proData = proData.apply(lambda row: row.fillna(row.mean()), axis=1)
+```
+
+```{python}
+lip_pos_anova = lip_pos_anova[lip_pos_anova.Lipid.isin(lipData.index)]
+metab_anova = metab_anova[metab_anova.Metabolite.isin(metabData.index)]
+pro_anova = pro_anova[pro_anova.Protein.isin(proData.index)]
+
+lip_pos_anova.shape, metab_anova.shape, pro_anova.shape
+```
+
+```{python}
+# optionally subset the data to only include significant biomolecules
+sig_lipids = lip_pos_anova[lip_pos_anova["P_value_A_Cal04_vs_Mock"] < 0.05].Lipid
+sig_metabs = metab_anova[metab_anova["P_value_A_Cal04_vs_Mock"] < 0.05].Metabolite
+sig_proteins = pro_anova[pro_anova["P_value_A_Cal04_vs_Mock"] < 0.05].Protein
+
+lipData = lipData.loc[sig_lipids]
+metabData = metabData.loc[sig_metabs]
+proData = proData.loc[sig_proteins]
+
+lipData.shape, metabData.shape, proData.shape
+```
+
+```{python}
+# get the elements in lipData.columns that are in fmeta['SampleID_lipidpos']
+# lipData = lipData.loc[:,lipData.columns.isin(fmeta['SampleID_lipidpos'])]
+# metabData = metabData.loc[:,metabData.columns.isin(fmeta['SampleID_metab'])]
+# proData = proData.loc[:,proData.columns.isin(fmeta['SampleID_proteomics'])]
+
+np.random.seed(1565)
+cal_inds = np.random.choice(np.where(y == 'Cal')[0], int(np.sum(y == 'Cal') * 0.2))
+mock_inds = np.random.choice(np.where(y == 'Mock')[0], int(np.sum(y == 'Mock') * 0.2))
+test_inds = np.concatenate([cal_inds, mock_inds])
+
+train_inds = np.isin(np.arange(y.shape[0]), test_inds) == False
+
+train_lip = lipData.iloc[:,train_inds]
+train_pro = proData.iloc[:,train_inds]
+train_metab = metabData.iloc[:,train_inds]
+
+test_lip = lipData.iloc[:, test_inds]
+test_pro = proData.iloc[:, test_inds]
+test_metab = metabData.iloc[:, test_inds]
+
+ytrain = y.iloc[train_inds]
+ytest = y.iloc[test_inds]
+```
+
+### Construct the Model
+
+```{python}
+# three view-specific encoders with the appropriate input size:
+lip_marg = FC_Marginal(input_size=train_lip.shape[0], hidden_sizes=[128, 128], z_dim=10, prediction_dim=y.nunique())
+metab_marg = FC_Marginal(input_size=train_metab.shape[0], hidden_sizes=[64, 64], z_dim=10, prediction_dim=y.nunique())
+pro_marg = FC_Marginal(input_size=train_pro.shape[0], hidden_sizes=[256, 128], z_dim=10, prediction_dim=y.nunique())
+
+# joint model
+joint_model = JointVAE(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128)
+
+# define optimizer
+optimizer = AdamW(joint_model.parameters(), lr=1e-3)
+```
+
+```{python}
+# turn data into tensors
+lip_tensor = torch.tensor(train_lip.T.values, dtype=torch.float32)
+pro_tensor = torch.tensor(train_pro.T.values, dtype=torch.float32)
+metab_tensor = torch.tensor(train_metab.T.values, dtype=torch.float32)
+
+y_gt = ytrain.astype('category').cat.codes
+y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+
+for i in range(2000):
+
+    views = [lip_tensor, metab_tensor, pro_tensor]
+    
+    # randomly drop an index with low probability
+    if np.random.rand() < 0.1:
+        idx = np.random.randint(0, len(views))
+        views = [v if i != idx else None for i, v in enumerate(views)]
+
+    # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
+    yhat, poe_dist, yhats, dists = joint_model(views)
+
+    # pass the predictions and distributions to the loss function and update parameters
+    loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists)
+
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
+    optimizer.step()
+
+    print(f'Epoch {i+1} loss: {loss.item():.3f}')
+```
+
+```{python}
+# example prediction
+joint_model.eval()
+
+ytest_gt = ytest.astype('category').cat.codes
+
+liptest_tensor = torch.tensor(test_lip.T.values, dtype=torch.float32)
+protest_tensor = torch.tensor(test_pro.T.values, dtype=torch.float32)
+metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
+
+with torch.inference_mode():
+    yhat, poe_dist, yhats, dists = joint_model([liptest_tensor, metabtest_tensor, protest_tensor])
+
+ypred = yhat.argmax(dim=1).numpy()
+
+(ypred == ytest_gt.to_numpy()).mean()
+```
+
+```{python}
+confusion_matrix(ytest_gt, ypred)
+```
+
+```{python}
+# order is lip metab pro
+(
+    (yhats[0].argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean(),
+    (yhats[1].argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean(),
+    (yhats[2].argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean()
+)
+```
+
+```{python}
+pred_lip = yhats[0].argmax(dim=1).numpy()
+pred_pro = yhats[1].argmax(dim=1).numpy()
+pred_metab = yhats[2].argmax(dim=1).numpy()
+
+(
+    confusion_matrix(ytest_gt.to_numpy(), pred_lip),
+    confusion_matrix(ytest_gt.to_numpy(), pred_pro),
+    confusion_matrix(ytest_gt.to_numpy(), pred_metab)
+)
+```
+
+# Variable Importance
+
+## Gradient analysis
+
+As a first pass for variable importance, I simply take the gradient of input input w.r.t. the predicted output probability of the positive class.  Essentially I am trying to determine which input biomolecules are important for the ability of the model to predict the positive class.
+
+```{python}
+# get a single positive example (-1, the last example is positive)
+liptest_pos = torch.clone(liptest_tensor[-1].unsqueeze(0))
+protest_pos = torch.clone(protest_tensor[-1].unsqueeze(0))
+metabtest_pos = torch.clone(metabtest_tensor[-1].unsqueeze(0))
+
+liptest_pos.requires_grad = True
+protest_pos.requires_grad = True
+metabtest_pos.requires_grad = True
+
+yhat, poe_dist, yhats, dists = joint_model([liptest_pos, metabtest_pos, protest_pos])
+```
+
+```{python}
+yhat[0,1].backward()
+```
+
+```{python}
+# get the gradients and multiply by the input
+# (
+# liptest_pos.grad.abs().argsort()[:,:10],
+# protest_pos.grad.abs().argsort()[:,:10],
+# metabtest_pos.grad.abs().argsort()[:,:10]
+# )
+
+liptest_scores = liptest_pos.grad * liptest_pos
+protest_scores = protest_pos.grad * protest_pos
+metabtest_scores = metabtest_pos.grad * metabtest_pos
+
+(
+liptest_scores.argsort()[:,:10],
+protest_scores.argsort()[:,:10],
+metabtest_scores.argsort()[:,:10]
+)
+```
+
+```{python}
+liptest_pos = torch.clone(liptest_tensor[ytest_gt.to_numpy() == 1])
+protest_pos = torch.clone(protest_tensor[ytest_gt.to_numpy() == 1])
+metabtest_pos = torch.clone(metabtest_tensor[ytest_gt.to_numpy() == 1])
+
+liptest_pos.requires_grad = True
+protest_pos.requires_grad = True
+metabtest_pos.requires_grad = True
+
+yhat, poe_dist, yhats, dists = joint_model([liptest_pos, metabtest_pos, protest_pos])
+```
+
+```{python}
+yhat[:,1].mean().backward()
+```
+
+```{python}
+# (
+# liptest_pos.grad.abs().sum(axis=0).argsort()[:10],
+# protest_pos.grad.abs().sum(axis=0).argsort()[:10],
+# metabtest_pos.grad.abs().sum(axis=0).argsort()[:10]
+# )
+
+liptest_scores = liptest_pos.grad * liptest_pos
+protest_scores = protest_pos.grad * protest_pos
+metabtest_scores = metabtest_pos.grad * metabtest_pos
+
+(
+liptest_scores.sum(axis = 0).argsort()[:10],
+protest_scores.sum(axis = 0).argsort()[:10],
+metabtest_scores.sum(axis = 0).argsort()[:10]
+)
+```
+
+# Integrated Gradients
+
+Integrated gradients overcome the problem of non-sensitivity of gradients methods, see https://arxiv.org/pdf/1703.01365.pdf for an explanation.  
+
+As described in the paper, we start at some 'non-informative' baseline, and move linearly towards our actual input, taking the gradient at each step and accumulating.  At the end we divide by the number of steps to get the average gradient, which approximates and integral.  This is the integrated gradient.
+
+```{python}
+liptest_pos = torch.clone(liptest_tensor[ytest_gt.to_numpy() == 1])
+protest_pos = torch.clone(protest_tensor[ytest_gt.to_numpy() == 1])
+metabtest_pos = torch.clone(metabtest_tensor[ytest_gt.to_numpy() == 1])
+```
+
+```{python}
+def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1):
+    grads = [torch.zeros_like(v) for v in baselines]
+    for i in range(1, n_steps + 1):
+        tmp = [torch.clone(b) for b in baselines]
+        tmp = [b + i * (vtest - b) for b, vtest in zip(tmp, views)]
+        tmp = [b.requires_grad_() for b in tmp]
+        yhat, poe_dist, yhats, dists = model(tmp)
+        yhat[:,class_idx].mean().backward()
+        grads = [g + b.grad for g, b in zip(grads, tmp)]
+
+    return [g * (v - b) / n_steps for g, b, v in zip(grads, baselines, views)]
+```
+
+```{python}
+# move along the baseline (noise) to input, take the gradient at each step, and accumulate.  Divide at the end to form an average.
+# lip_baseline = torch.randn_like(liptest_pos, requires_grad = True)*liptest_pos.std() + liptest_pos.mean()
+# pro_baseline = torch.randn_like(protest_pos, requires_grad = True)*protest_pos.std() + protest_pos.mean()
+# metab_baseline = torch.randn_like(metabtest_pos, requires_grad = True)*metabtest_pos.std() + metabtest_pos.mean()
+
+# grad_lip = torch.zeros_like(lip_baseline)
+# grad_pro = torch.zeros_like(pro_baseline)
+# grad_metab = torch.zeros_like(metab_baseline)
+
+# n_steps = 100
+
+# for i in range(1, n_steps + 1):
+#     tmp_lip = torch.clone(lip_baseline)
+#     tmp_pro = torch.clone(pro_baseline)
+#     tmp_metab = torch.clone(metab_baseline)
+
+#     tmp_lip = tmp_lip + i * (liptest_pos - tmp_lip)/n_steps
+#     tmp_pro = tmp_pro + i * (protest_pos - tmp_pro)/n_steps
+#     tmp_metab = tmp_metab + i * (metabtest_pos - tmp_metab)/n_steps
+
+#     tmp_lip.requires_grad = True
+#     tmp_pro.requires_grad = True
+#     tmp_metab.requires_grad = True
+
+#     yhat, poe_dist, yhats, dists = joint_model([tmp_lip, tmp_metab, tmp_pro])
+
+#     yhat[:,1].mean().backward()
+
+#     grad_lip += tmp_lip.grad
+#     grad_pro += tmp_pro.grad
+#     grad_metab += tmp_metab.grad
+```
+
+```{python}
+# baseline is normal noise with mean and std from the data
+# vary these to see if we get different results...
+# scree plot
+# lip_baseline = torch.randn_like(liptest_pos)*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
+# pro_baseline = torch.randn_like(protest_pos)*protest_pos.std().numpy() + protest_pos.mean().numpy()
+# metab_baseline = torch.randn_like(metabtest_pos)*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+
+lip_baseline = -torch.rand_like(liptest_pos)/2# *2*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
+pro_baseline = -torch.rand_like(protest_pos)/2# *2*protest_pos.std().numpy() + protest_pos.mean().numpy()
+metab_baseline = -torch.rand_like(metabtest_pos)/2# *2*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+```
+
+```{python}
+joint_model.eval()
+
+lip_int_scores, metab_int_scores, pro_int_scores = integrated_grads(
+    [liptest_pos, metabtest_pos, protest_pos], 
+    [lip_baseline, metab_baseline, pro_baseline], 
+    joint_model, n_steps = 100, class_idx = 1
+)
+```
+
+```{python}
+top_lip = lip_int_scores.sum(axis = 0).argsort()[:10]
+top_pro = pro_int_scores.sum(axis = 0).argsort()[:10]
+top_metab = metab_int_scores.sum(axis = 0).argsort()[:10]
+
+(
+top_lip,
+top_pro,
+top_metab
+)
+```
+
+```{python}
+sorted_lip_scores = sorted(lip_int_scores.sum(axis = 0).numpy(), reverse = True)
+sorted_pro_scores = sorted(pro_int_scores.sum(axis = 0).numpy(), reverse = True)
+sorted_metab_scores = sorted(metab_int_scores.sum(axis = 0).numpy(), reverse = True)
+
+lipids_out = pd.DataFrame({
+    "Lipids":test_lip.iloc[lip_int_scores.sum(axis = 0).argsort().numpy(), :].index,
+    "Lipid_Scores": sorted_lip_scores
+})
+
+proteins_out = pd.DataFrame({
+    "Proteins": test_pro.iloc[pro_int_scores.sum(axis = 0).argsort().numpy(), :].index,
+    "Protein_Scores": sorted_pro_scores
+})
+
+metabolites_out = pd.DataFrame({
+    "Metabolites": test_metab.iloc[metab_int_scores.sum(axis = 0).argsort().numpy(), :].index,
+    "Metabolite_Scores": sorted_metab_scores
+})
+
+# lipids_out.to_csv("./output/lipids_ICL104share_igrads.csv")
+# proteins_out.to_csv("./output/proteins_ICL104share_igrads.csv")
+# metabolites_out.to_csv("./output/metabolites_ICL104share_igrads.csv")
+```
+
+```{python}
+imv_proteins = proteins_out['Proteins']
+imv_metabs = metabolites_out['Metabolites']
+```
+
+```{python}
+anova_proteins = pro_anova[pro_anova['P_value_A_Cal04_vs_Mock'] < 0.05]["Protein"]
+anova_metabs = metab_anova[metab_anova['P_value_A_Cal04_vs_Mock'] < 0.05]["Metabolite"]
+```
+
+```{python}
+# get the intersect between imv_proteins and anova_proteins
+imv_proteins[imv_proteins.isin(anova_proteins)]
+```
+
+```{python}
+(
+test_lip.iloc[top_lip.numpy(), :].index,
+test_pro.iloc[top_pro.numpy(), :].index,
+test_metab.iloc[top_metab.numpy(), :].index
+)
+```
+
+```{python}
+import matplotlib.pyplot as plt
+
+fig, axs = plt.subplots(3, 1, figsize = (10, 12))
+axs[0].plot(sorted(lip_int_scores.sum(axis = 0).numpy(), reverse = True))
+axs[1].plot(sorted(pro_int_scores.sum(axis = 0).numpy(), reverse = True))
+axs[2].plot(sorted(metab_int_scores.sum(axis = 0).numpy(), reverse = True))
+
+axs[0].set_title('Lipid')
+axs[1].set_title('Protein')
+axs[2].set_title('Metabolite')
+
+plt.tight_layout()
+```
+
+```{python}
+lip_ranks = {}
+pro_ranks = {}
+metab_ranks = {}
+
+for k in range(50):
+    lip_baseline = -torch.rand_like(liptest_pos)/2# *2*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
+    pro_baseline = -torch.rand_like(protest_pos)/2# *2*protest_pos.std().numpy() + protest_pos.mean().numpy()
+    metab_baseline = -torch.rand_like(metabtest_pos)/2# *2*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+
+    lip_int_scores, metab_int_scores, pro_int_scores = integrated_grads(
+        [liptest_pos, metabtest_pos, protest_pos], 
+        [lip_baseline, metab_baseline, pro_baseline], 
+        joint_model, n_steps = 100, class_idx = 1
+    )
+
+    lip_argsort = lip_int_scores.sum(axis = 0).argsort()
+    pro_argsort = pro_int_scores.sum(axis = 0).argsort()
+    metab_argsort = metab_int_scores.sum(axis = 0).argsort()
+
+    for r, i in enumerate(lip_argsort.numpy()):
+        lip_ranks.setdefault(i, []).append(r)
+    
+    for r, i in enumerate(pro_argsort.numpy()):
+        pro_ranks.setdefault(i, []).append(r)
+
+    for r, i in enumerate(metab_argsort.numpy()):
+        metab_ranks.setdefault(i, []).append(r)
+```
+
+```{python}
+lip_mu_std = {k: (np.mean(v), np.std(v)) for k, v in lip_ranks.items()}
+pro_mu_std = {k: (np.mean(v), np.std(v)) for k, v in pro_ranks.items()}
+metab_mu_std = {k: (np.mean(v), np.std(v)) for k, v in metab_ranks.items()}
+```
+
+```{python}
+# sort lip_mu_std by the std
+sorted(lip_mu_std.items(), key = lambda x: x[1][0], reverse = False)[:10]
+```
+
+```{python}
+sorted(pro_mu_std.items(), key = lambda x: x[1][1], reverse = False)[:10]
+```
+
+```{python}
+sorted(metab_mu_std.items(), key = lambda x: x[1][1], reverse = False)[:10]
+```
+
+# Train on TCGA
+
+The TCGA dataset was processed as in (Lee and van der Schaar, 2021).  The features are kernel-PCA representations of the
+TCGA gene expression data.  The labels are the 1 year mortality status of the patients.
+
+```{python}
+# load pre-processed tcga data
+tcgadata = np.load('/Users/clab683/Documents/Data/tcga/multi_omics_1yr_mortality.npz')
+```
+
+```{python}
+rnaseq = torch.tensor(tcgadata['mRNAseq']).float()
+methyl = torch.tensor(tcgadata['Methylation']).float()
+mirna = torch.tensor(tcgadata['miRNAseq']).float()
+rppa = torch.tensor(tcgadata['RPPA']).float()
+labels = torch.tensor(tcgadata['label']).reshape(-1).long()
+
+# sample train indices
+train_inds = np.random.choice(len(rnaseq), size=int(len(rnaseq) * 0.7), replace=False)
+valid_inds = np.setdiff1d(np.arange(len(rnaseq)), train_inds)
+test_inds = np.random.choice(valid_inds, size=int(len(valid_inds) * 0.5), replace=False)
+valid_inds = np.setdiff1d(valid_inds, test_inds)
+
+# create train, valid, and test tensors
+rnaseq_train = rnaseq[train_inds]
+methyl_train = methyl[train_inds]
+mirna_train = mirna[train_inds]
+rppa_train = rppa[train_inds]
+labels_train = labels[train_inds]
+
+rnaseq_valid = rnaseq[valid_inds]
+methyl_valid = methyl[valid_inds]
+mirna_valid = mirna[valid_inds]
+rppa_valid = rppa[valid_inds]
+labels_valid = labels[valid_inds]
+
+rnaseq_test = rnaseq[test_inds]
+methyl_test = methyl[test_inds]
+mirna_test = mirna[test_inds]
+rppa_test = rppa[test_inds]
+labels_test = labels[test_inds]
+
+# dataloaders
+train_dataset = torch.utils.data.TensorDataset(rnaseq_train, methyl_train, mirna_train, rppa_train, labels_train)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+valid_dataset = torch.utils.data.TensorDataset(rnaseq_valid, methyl_valid, mirna_valid, rppa_valid, labels_valid)
+valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=32, shuffle=True)
+
+test_dataset = torch.utils.data.TensorDataset(rnaseq_test, methyl_test, mirna_test, rppa_test, labels_test)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=32, shuffle=True)
+```
+
+### Build the model
+
+```{python}
+# reload these modules with sys and importlib
+import sys
+import importlib
+
+# import the modules
+importlib.reload(sys.modules['models.fc_imv'])
+from models.fc_imv import FC_Marginal, JointVAE
+
+# three view-specific encoders with the appropriate input size:
+marg_model = FC_Marginal(input_size=100, hidden_sizes=[256, 256], z_dim=32, prediction_dim=labels.unique().size()[0])
+
+# joint model
+joint_model = JointVAE(marginal_models=[copy.deepcopy(marg_model) for _ in range(4)], hidden_dim=128)
+
+# define optimizer
+optimizer = AdamW(joint_model.parameters(), lr=1e-4)
+```
+
+## Training
+
+To facilitate training, we need to group samples into sub-batches with similar view-missing patterns.  In a single batch, there may be several sub-batches that we feed through the model one by one.  We accumulate the loss over these sub-batches and update the gradients one all sub-batches have been passed forward.
+
+The classes are heavily imbalanced, about 80% of patients survive to 1 year.  I use a class-balanced focal loss to address this issue.
+
+```{python}
+# a function to build batches that group together batches of samples with the same view-missing patterns
+def build_combo_batches(views):
+    num_view_missing = []
+
+    for view in views:
+        na_views = torch.isnan(view).sum(axis = 1) > 0
+        num_view_missing.append(na_views)
+
+    which_na = torch.stack(num_view_missing, axis = 1)
+
+    input_dict = {}
+    gt_dict = {}
+
+    comb = torch.unique(which_na, dim = 0)[0]
+    which_na == comb.unsqueeze(0)
+
+    for comb in torch.unique(which_na, dim = 0):
+        inds = (which_na == comb.unsqueeze(0)).all(axis = 1)
+        input_batch = [views[i][inds] if not comb[i] else None for i in range(len(views))]
+
+        gt_dict[comb] = y[inds]
+        input_dict[comb] = input_batch
+
+    return input_dict, gt_dict
+```
+
+```{python}
+# handle class imbalance
+alpha = torch.tensor([1/0.9391, 1/0.1609])
+# focal constant 
+gamma = 3
+
+for epoch in range(40):
+    accumulate_loss = []
+    for idx, batch in enumerate(train_loader):
+        x_rnaseq, x_methyl, x_mirna, x_clinical, y = batch
+        views = x_rnaseq, x_methyl, x_mirna, x_clinical
+
+        input_dict, gt_dict = build_combo_batches(views)
+
+        loss = 0
+        for comb, x in input_dict.items():
+            y_gt = gt_dict[comb]
+            yhat, poe_dist, yhats, dists = joint_model(x)
+            # pass alpha and gamma to do focal loss
+            tmp_loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists, alpha = alpha, gamma = gamma)
+            loss += tmp_loss
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
+        optimizer.step()
+
+        if idx % 50 == 0 and idx != 0:
+            print(loss.item())
+
+        accumulate_loss.append(loss.item())
+
+    joint_model.eval()
+    allpreds = []
+    all_gt = []
+    
+    for batch in valid_loader:
+        x_rnaseq, x_methyl, x_mirna, x_clinical, y = batch
+        views = [x_rnaseq, x_methyl, x_mirna, x_clinical]
+
+        num_view_missing = []
+
+        input_dict, gt_dict = build_combo_batches(views)
+
+        for comb, x in input_dict.items():
+            y_gt = gt_dict[comb]
+            with torch.inference_mode():
+                yhat, poe_dist, yhats, dists = joint_model(x)
+            preds = yhat.argmax(axis = 1) == y_gt
+            allpreds.extend(preds.tolist())
+            all_gt.extend(y_gt.tolist())
+
+    pred_1 = np.array(allpreds)[np.array(all_gt) == 1]
+    pred_0 = np.array(allpreds)[np.array(all_gt) == 0]
+        
+    joint_model.train()
+    print(f"Average loss for epoch {epoch} is {np.mean(accumulate_loss)}, validation accuracy: 0: {np.mean(pred_0)}, 1: {np.mean(pred_1)}")
+```
+
+## Evaluation on test set
+
+```{python}
+joint_model.eval()
+all_preds = []
+all_gt = []
+y_score = []
+
+for batch in test_loader:
+    x_rnaseq, x_methyl, x_mirna, x_clinical, y = batch
+    views = [x_rnaseq, x_methyl, x_mirna, x_clinical]
+
+    num_view_missing = []
+
+    input_dict, gt_dict = build_combo_batches(views)
+
+    for comb, x in input_dict.items():
+        y_gt = gt_dict[comb]
+        with torch.inference_mode():
+            yhat, poe_dist, yhats, dists = joint_model(x)
+        preds = yhat.argmax(axis = 1)
+        all_preds.extend(preds.tolist())
+        all_gt.extend(y_gt.tolist())
+        y_score.extend(yhat[:, 1].tolist())
+```
+
+```{python}
+from sklearn.metrics import roc_curve, auc
+
+fpr, tpr, _ = roc_curve(all_gt, y_score)
+auc(fpr, tpr)
+```
+
+```{python}
+confusion_matrix(all_gt, all_preds)
+```
+
+```{python}
+plt.plot(fpr, tpr)
+```
+
+```{python}
+# drop protein rows with all NA values 
+
+# get indices with all nan values
+# train_inds = (train_pro.isnull() == False).sum(axis = 1) > 0
+# test_inds = (test_pro.isnull() == False).sum(axis = 1) > 0
+
+# bad_inds = train_inds * test_inds
+
+# # drop bad_inds
+# train_pro = train_pro[bad_inds]
+# test_pro = test_pro[bad_inds]
+
+# # same for lipids and metabolites:
+# train_inds = (train_lip.isnull() == False).sum(axis = 1) > 0
+# test_inds = (test_lip.isnull() == False).sum(axis = 1) > 0
+
+# bad_inds = train_inds * test_inds
+
+# train_lip = train_lip[bad_inds]
+# test_lip = test_lip[bad_inds]
+
+# train_inds = (train_metab.isnull() == False).sum(axis = 1) > 0
+# test_inds = (test_metab.isnull() == False).sum(axis = 1) > 0
+
+# bad_inds = train_inds * test_inds
+
+# train_metab = train_metab[bad_inds]
+# test_metab = test_metab[bad_inds]
+```
+
