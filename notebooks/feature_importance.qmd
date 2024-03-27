@@ -46,8 +46,8 @@ import seaborn as sns
 
 ```{python}
 proData = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_proteins_luke.csv')
-lipData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/ICL104_lipids_aligned_for_stats.xlsx")
-metabData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/OMICS_ICL104_Metabolomics_YMK.xlsx")
+lipData = pd.read_excel("/Volumes/Data_Harmony/Datasets/DHS_Omics/ICL04/ICL104_lipids_aligned_for_stats.xlsx")
+metabData = pd.read_excel("/Volumes/Data_Harmony/Datasets/DHS_Omics/ICL04/OMICS_ICL104_Metabolomics_YMK.xlsx")
 metabData = metabData.drop(columns=['KEGG', 'CAS', 'PubChem'])
 
 fmeta = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_fmeta.csv')
@@ -158,7 +158,7 @@ optimizer = AdamW(joint_model.parameters(), lr=1e-4)
 ```
 
 ```{python}
-joint_model.load_state_dict(torch.load('joint_model_nb.pt'))
+joint_model.load_state_dict(torch.load('../notebooks/joint_model_nb.pt'))
 ```
 
 ```{python}
@@ -181,8 +181,7 @@ metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
 ```
 
 ```{python}
-for i in range(1250):
-
+for i in range(2000):
     views = [lip_tensor, metab_tensor, pro_tensor]
     
     # randomly drop an index with low probability
@@ -194,7 +193,7 @@ for i in range(1250):
     yhat, h, yhats, hiddens = joint_model(views)
 
     # pass the predictions and distributions to the loss function and update parameters
-    loss = joint_model.loss(y_gt, yhat, yhats)
+    _, _, loss = joint_model.loss(y_gt, yhat, yhats)
 
     optimizer.zero_grad()
     loss.backward()
@@ -286,7 +285,7 @@ shap_lip = shap_values[0][0]
 shap_metab = shap_values[0][1]
 shap_pro = shap_values[0][2]
 
-shap.summary_plot(shap_metab, metabtest_tensor, show = False)
+shap.summary_plot(shap_metab, metab_tensor, show = False)
 ```
 
 ```{python}
@@ -301,31 +300,31 @@ sorted_metab_shap = sorted(abs_metab_shap, reverse = True)
 
 # shap output dataframes
 lipids_shap = pd.DataFrame({
-    "Lipids":test_lip.iloc[(-abs_lip_shap).argsort(), :].index,
+    "Lipids":train_lip.iloc[(-abs_lip_shap).argsort(), :].index,
     "Lipid_Scores": sorted_lip_shap
 })
 
 proteins_shap = pd.DataFrame({
-    "Proteins": test_pro.iloc[(-abs_pro_shap).argsort(), :].index,
+    "Proteins": train_pro.iloc[(-abs_pro_shap).argsort(), :].index,
     "Protein_Scores": sorted_pro_shap
 })
 
 metabolites_shap = pd.DataFrame({
-    "Metabolites": test_metab.iloc[(-abs_metab_shap).argsort(), :].index,
+    "Metabolites": train_metab.iloc[(-abs_metab_shap).argsort(), :].index,
     "Metabolite_Scores": sorted_metab_shap
 })
 
 lip_shap_scores_df = pd.DataFrame(shap_lip.T)
-lip_shap_scores_df.index = test_lip.index
-lip_shap_scores_df.columns = test_lip.columns
+lip_shap_scores_df.index = train_lip.index
+lip_shap_scores_df.columns = train_lip.columns
 
 pro_shap_scores_df = pd.DataFrame(shap_pro.T)
-pro_shap_scores_df.index = test_pro.index
-pro_shap_scores_df.columns = test_pro.columns
+pro_shap_scores_df.index = train_pro.index
+pro_shap_scores_df.columns = train_pro.columns
 
 metab_shap_scores_df = pd.DataFrame(shap_metab.T)
-metab_shap_scores_df.index = test_metab.index
-metab_shap_scores_df.columns = test_metab.columns
+metab_shap_scores_df.index = train_metab.index
+metab_shap_scores_df.columns = train_metab.columns
 
 lipids_shap_out = lipids_shap.merge(lip_shap_scores_df, how = 'left', left_on = 'Lipids', right_on = "Name")
 proteins_shap_out = proteins_shap.merge(pro_shap_scores_df, how = 'left', left_on = 'Proteins', right_on = "Protein")
@@ -340,9 +339,11 @@ assert((metabolites_shap_out.iloc[:, 2:].abs().sum(axis=1) == metabolites_shap_o
 ```
 
 ```{python}
-lipids_shap_out.to_csv(f"./output/lipids_shap_mlp_{thetime}.csv")
-proteins_shap_out.to_csv(f"./output/proteins_shap_mlp_{thetime}.csv")
-metabolites_shap_out.to_csv(f"./output/metabolites_shap_mlp_{thetime}.csv")
+thetime = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+lipids_shap_out.to_csv(f"../output/lipids_shap_mlp_{thetime}.csv")
+proteins_shap_out.to_csv(f"../output/proteins_shap_mlp_{thetime}.csv")
+metabolites_shap_out.to_csv(f"../output/metabolites_shap_mlp_{thetime}.csv")
 ```
 
 # Integrated Gradients
@@ -365,13 +366,13 @@ metabtest_pos = torch.clone(metabtest_tensor[ytest_gt.to_numpy() == 0])
 # baseline is normal noise with mean and std from the data
 # vary these to see if we get different results...
 # scree plot
-lip_baseline = torch.randn_like(liptest_pos)*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
-pro_baseline = torch.randn_like(protest_pos)*protest_pos.std().numpy() + protest_pos.mean().numpy()
-metab_baseline = torch.randn_like(metabtest_pos)*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+lip_baseline = torch.randn_like(lip_tensor)*lip_tensor.std().numpy() + lip_tensor.mean().numpy()
+pro_baseline = torch.randn_like(pro_tensor)*pro_tensor.std().numpy() + pro_tensor.mean().numpy()
+metab_baseline = torch.randn_like(metab_tensor)*metab_tensor.std().numpy() + metab_tensor.mean().numpy()
 
-lip_baseline = -torch.rand_like(liptest_pos)/2# *2*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
-pro_baseline = -torch.rand_like(protest_pos)/2# *2*protest_pos.std().numpy() + protest_pos.mean().numpy()
-metab_baseline = -torch.rand_like(metabtest_pos)/2# *2*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+lip_baseline = -torch.rand_like(lip_tensor)/2# *2*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
+pro_baseline = -torch.rand_like(pro_tensor)/2# *2*protest_pos.std().numpy() + protest_pos.mean().numpy()
+metab_baseline = -torch.rand_like(metab_tensor)/2# *2*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
 
 # shuffle values of lip_baseline
 lip_baseline = lip_baseline[:,torch.randperm(lip_baseline.shape[1])]
@@ -414,31 +415,31 @@ sorted_metab_igrads = sorted(abs_metab_igrads, reverse = True)
 ```{python}
 # Output dataframes
 lipids_igrad = pd.DataFrame({
-    "Lipids":test_lip.iloc[(-abs_lip_igrads).argsort(), :].index,
+    "Lipids":train_lip.iloc[(-abs_lip_igrads).argsort(), :].index,
     "Lipid_Scores": sorted_lip_igrads
 })
 
 proteins_igrad = pd.DataFrame({
-    "Proteins": test_pro.iloc[(-abs_pro_igrads).argsort(), :].index,
+    "Proteins": train_pro.iloc[(-abs_pro_igrads).argsort(), :].index,
     "Protein_Scores": sorted_pro_igrads
 })
 
 metabolites_igrad = pd.DataFrame({
-    "Metabolites": test_metab.iloc[(-abs_metab_igrads).argsort(), :].index,
+    "Metabolites": train_metab.iloc[(-abs_metab_igrads).argsort(), :].index,
     "Metabolite_Scores": sorted_metab_igrads
 })
 
 lip_igrad_scores_df = pd.DataFrame(lip_igrad_scores.T)
-lip_igrad_scores_df.index = test_lip.index
-lip_igrad_scores_df.columns = test_lip.columns[ytest_gt.to_numpy() == 0]
+lip_igrad_scores_df.index = train_lip.index
+lip_igrad_scores_df.columns = train_lip.columns
 
 pro_igrad_scores_df = pd.DataFrame(pro_igrad_scores.T)
-pro_igrad_scores_df.index = test_pro.index
-pro_igrad_scores_df.columns = test_pro.columns[ytest_gt.to_numpy() == 0]
+pro_igrad_scores_df.index = train_pro.index
+pro_igrad_scores_df.columns = train_pro.columns
 
 metab_igrad_scores_df = pd.DataFrame(metab_igrad_scores.T)
-metab_igrad_scores_df.index = test_metab.index
-metab_igrad_scores_df.columns = test_metab.columns[ytest_gt.to_numpy() == 0]
+metab_igrad_scores_df.index = train_metab.index
+metab_igrad_scores_df.columns = train_metab.columns
 
 # left join lipids_out to lip int scores "Lipids" = "Name"
 lipids_igrad_out = lipids_igrad.merge(lip_igrad_scores_df, how = 'left', left_on = 'Lipids', right_on = "Name")
@@ -449,7 +450,11 @@ metabolites_igrad_out = metabolites_igrad.merge(metab_igrad_scores_df, how = 'le
 ```
 
 ```{python}
-proteins_igrad_out.to_csv("/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-proteins-rangefix-2024-01-31.csv", index=False)
+thetime = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+proteins_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-proteins-{thetime}.csv", index=False)
+lipids_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-lipids-{thetime}.csv", index=False)
+metabolites_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-metabolites-{thetime}.csv", index=False)
 ```
 
 ### Integrated Gradient Plots
@@ -457,9 +462,9 @@ proteins_igrad_out.to_csv("/Users/clab683/git_repos/DeepIMV/output/igrads-notebo
 We plot the same beeswarm plots for integrated gradients as we did for SHAP values.  First we have to make some long dataframes that can be passed to seaborn:
 
 ```{python}
-lip_igrad_plot_df = make_igrad_plot_df(lipids_igrad_out, test_lip.reset_index(), num_biomols = 10, id_vars = "Name", var_name = "SampleID", value_name = "Input_value")
-pro_igrad_plot_df = make_igrad_plot_df(proteins_igrad_out, test_pro.reset_index(), num_biomols = 10, id_vars = "Protein", var_name = "SampleID", value_name = "Input_value")
-metab_igrad_plot_df = make_igrad_plot_df(metabolites_igrad_out, test_metab.reset_index(), num_biomols = 10, id_vars = "Metabolite", var_name = "SampleID", value_name = "Input_value")
+lip_igrad_plot_df = make_igrad_plot_df(lipids_igrad_out, train_lip.reset_index(), num_biomols = 10, id_vars = "Name", var_name = "SampleID", value_name = "Input_value")
+pro_igrad_plot_df = make_igrad_plot_df(proteins_igrad_out, train_pro.reset_index(), num_biomols = 10, id_vars = "Protein", var_name = "SampleID", value_name = "Input_value")
+metab_igrad_plot_df = make_igrad_plot_df(metabolites_igrad_out, train_metab.reset_index(), num_biomols = 10, id_vars = "Metabolite", var_name = "SampleID", value_name = "Input_value")
 ```
 
 ```{python}
