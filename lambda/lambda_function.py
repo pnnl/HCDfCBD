@@ -141,7 +141,7 @@ def plot_loss_curve(train_loss_list, valid_loss_list, out, event, ax):
     ax.plot(train_loss_list, label='Training loss')
     ax.plot([(i + 1)*event['validation_frequency'] for i in range(len(valid_loss_list))], valid_loss_list, label='Validation loss')
     # draw a vertical line at the best iteration
-    ax.axvline(out['best_iter'], color='r', linestyle='--', label=f'Best validation loss {valid_loss_list[-1]:.3f} at iteration {out["best_iter"]}')
+    ax.axvline(out['best_iter'], color='r', linestyle='--', label=f'Best validation loss {np.min(valid_loss_list):.3f} at iteration {out["best_iter"]}')
 
     ax.set_xlabel('Iteration')
     ax.set_ylabel('Loss')
@@ -197,7 +197,7 @@ def handler(event, context):
     y = fmeta[event['fmeta_target_name']]
 
     ## Make sure their fmeta is valid, we should just require this up-front, but I'm fixing it here for now
-    has_all = pd.Series([True]*fmeta.shape[0])
+    # has_all = pd.Series([True]*fmeta.shape[0])
 
     # for k in range(len(datas)):
     #     has_all = has_all & fmeta[event['fmeta_sample_names'][k]].isin(datas[k].columns)
@@ -292,7 +292,7 @@ def handler(event, context):
         torch.save(joint_model.state_dict(), event['final_model_path'])
     else:
         # load the pytorch model
-        joint_model.load_state_dict(torch.load(event['model_path']))
+        joint_model.load_state_dict(torch.load(event['best_model_path']))
     
     joint_model.eval()
 
