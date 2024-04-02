@@ -1,0 +1,377 @@
+---
+title: Intermediate Variable Importance
+jupyter: python3
+---
+
+In this notebook we assess SHAPley values and Integrated Gradients on **intermediate** layers of a deep neural network.  This follows from the `feature_importance` notebook which goes over the basics of using integrated gradients and SHAPley values.
+
+```{python}
+import sys
+sys.path.append('../')
+```
+
+```{python}
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+from diomics.models.multi_mlp import simple_FC, simple_FC_hook, JointMLP
+from diomics.featimportance.igrads import integrated_grads
+from diomics.featimportance.comparison import overlap_sets
+from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df
+import shap
+
+import numpy as np
+import pandas as pd
+import copy
+import datetime
+from tqdm import tqdm_notebook as tqdm
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+```
+
+## Load ICL-104
+
+```{python}
+proData = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_proteins_luke.csv')
+lipData = pd.read_excel("/Volumes/Data_Harmony/Datasets/DHS_Omics/ICL04/ICL104_lipids_aligned_for_stats.xlsx")
+metabData = pd.read_excel("/Volumes/Data_Harmony/Datasets/DHS_Omics/ICL04/OMICS_ICL104_Metabolomics_YMK.xlsx")
+metabData = metabData.drop(columns=['KEGG', 'CAS', 'PubChem'])
+
+fmeta = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_fmeta.csv')
+```
+
+```{python}
+# some samples missing from some datasets.
+lipData.shape, metabData.shape, proData.shape
+```
+
+```{python}
+# filter all rows in fmeta where any of SampleID_proteomics, SampleID_proteomics, SampleID_metab are NA
+fmeta = fmeta[~fmeta[['SampleID_proteomics', 'SampleID_lipidpos', 'SampleID_metab']].isna().any(axis=1)]
+fmeta['Virus_y'] = fmeta.Virus.replace({'Cal[0-9]*': 'Cal'}, regex=True)
+y = fmeta.Virus_y
+```
+
+```{python}
+# make the "LIPID" column in lipData the index
+lipData = lipData.set_index('Name')
+metabData = metabData.set_index('Metabolite')
+proData = proData.set_index('Protein')
+
+# replace zeros with NA
+lipData[lipData == 0] = np.nan
+metabData[metabData == 0] = np.nan
+
+# log2 transform the data and column-wise median center
+lipData = np.log2(lipData)
+metabData = np.log2(metabData)
+# proData = np.log2(proData) # don't if already log2
+
+lipData = lipData - lipData.median(axis=0)
+metabData = metabData - metabData.median(axis=0)
+proData = proData - proData.median(axis=0)
+
+# [0, 1] normalize all the data
+lipData = (lipData - np.min(lipData)) / (np.max(lipData) - np.min(lipData))
+metabData = (metabData - np.min(metabData)) / (np.max(metabData) - np.min(metabData))
+proData = (proData - np.min(proData)) / (np.max(proData) - np.min(proData))
+```
+
+```{python}
+# columns are nicely aligned
+y = pd.Series(['Cal' if 'Cal04' in el else 'Mock' for el in lipData.columns])
+```
+
+```{python}
+# drop indices with all null values
+lip_inds = (lipData.isnull() == False).sum(axis = 1) > 0
+metab_inds = (metabData.isnull() == False).sum(axis = 1) > 0
+pro_inds = (proData.isnull() == False).sum(axis = 1) > 0
+
+lipData = lipData[lip_inds]
+metabData = metabData[metab_inds]
+proData = proData[pro_inds]
+
+# impute the datasets with the row means
+lipData = lipData.apply(lambda row: row.fillna(row.mean()), axis=1)
+metabData = metabData.apply(lambda row: row.fillna(row.mean()), axis=1)
+proData = proData.apply(lambda row: row.fillna(row.mean()), axis=1)
+```
+
+```{python}
+# Use this if our column names are aligned with f_meta, otherwise make sure to manually check that they align
+# lipData = lipData.loc[:,lipData.columns.isin(fmeta['SampleID_lipidpos'])]
+# metabData = metabData.loc[:,metabData.columns.isin(fmeta['SampleID_metab'])]
+# proData = proData.loc[:,proData.columns.isin(fmeta['SampleID_proteomics'])]
+```
+
+```{python}
+np.random.seed(1565)
+cal_inds = np.random.choice(np.where(y == 'Cal')[0], int(np.sum(y == 'Cal') * 0.2))
+mock_inds = np.random.choice(np.where(y == 'Mock')[0], int(np.sum(y == 'Mock') * 0.2))
+test_inds = np.concatenate([cal_inds, mock_inds])
+
+train_inds = np.isin(np.arange(y.shape[0]), test_inds) == False
+
+train_lip = lipData.iloc[:,train_inds]
+train_pro = proData.iloc[:,train_inds]
+train_metab = metabData.iloc[:,train_inds]
+
+test_lip = lipData.iloc[:, test_inds]
+test_pro = proData.iloc[:, test_inds]
+test_metab = metabData.iloc[:, test_inds]
+
+ytrain = y.iloc[train_inds]
+ytest = y.iloc[test_inds]
+```
+
+```{python}
+# turn data into tensors
+lip_tensor = torch.tensor(train_lip.T.values, dtype=torch.float32)
+pro_tensor = torch.tensor(train_pro.T.values, dtype=torch.float32)
+metab_tensor = torch.tensor(train_metab.T.values, dtype=torch.float32)
+
+y_gt = ytrain.astype('category').cat.codes
+y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+
+views = [lip_tensor, metab_tensor, pro_tensor]
+
+# test data
+ytest_gt = ytest.astype('category').cat.codes
+
+liptest_tensor = torch.tensor(test_lip.T.values, dtype=torch.float32)
+protest_tensor = torch.tensor(test_pro.T.values, dtype=torch.float32)
+metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
+```
+
+### Shapley Values
+
+Shapley values are a method of assigning importance to input variables.  The particular flavor of the Shapley values framework is a version of DEEPLift (Shrikumar, Greenside, and Kundaj, 2017), implemented in the SHAP packages (https://shap.readthedocs.io/en/latest/index.html) and modified with findings from (Lee and Lundberg, 2017).  
+
+First we load the model and weights, see previous notebooks for model training.
+```{python}
+# three view-specific encoders with the appropriate input size:
+
+# the last hidden size must be the same since we are averaging
+last_hidden_size = 64
+
+lip_marg = simple_FC(input_size=train_lip.shape[0], hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique())
+metab_marg = simple_FC(input_size=train_metab.shape[0], hidden_sizes=[64, last_hidden_size], prediction_dim=y.nunique())
+pro_marg = simple_FC(input_size=train_pro.shape[0], hidden_sizes=[256, last_hidden_size], prediction_dim=y.nunique())
+
+# joint model
+joint_model_nohooks = JointMLP(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128, hooks=False)
+```
+
+```{python}
+joint_model.load_state_dict(torch.load('../notebooks/joint_model_nb.pt'))
+```
+
+```{python}
+# need to wrap the model in this class to get around some issues with the SHAP package
+class JointMLPWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x1, x2, x3):
+        yhat, _, _, _ = self.model([x1, x2, x3])
+        return yhat
+
+joint_model_wrp = JointMLPWrapper(joint_model_nohooks)
+```
+
+To make the explainer object target an intermediate layer we pass a tuple `(model, layer)` to the `DeepExplainer` class.  We target the second fully connected layer of the joint model.
+
+```{python}
+# make the explainer object
+tgt_layer = joint_model_wrp.model.fc2
+explainer = shap.DeepExplainer((joint_model_wrp, tgt_layer), views)
+```
+
+```{python}
+# compute the shapley values
+shap_values = explainer.shap_values([lip_tensor, metab_tensor, pro_tensor], check_additivity=False)
+```
+
+```{python}
+# plot the intermediate layer shapley values
+fig = plt.gcf()
+
+# index 0 for the `Cal` class
+shap.summary_plot(shap_values[0][0], show = False)
+```
+
+# Integrated Gradients
+
+Integrated gradients overcome the problem of non-sensitivity of gradients methods, see https://arxiv.org/pdf/1703.01365.pdf for an explanation.  
+
+As described in the paper, we start at some 'non-informative' baseline, and move linearly towards our actual input, taking the gradient at each step and accumulating.  At the end we divide by the number of steps to get the average gradient, which approximates an integral.  This is the integrated gradient and the magnitude of each score can be seen as the strength of attribute, with the sign denoting the effect of the variable on the outcome.
+
+In this example, we do a two step process of computing the integrated gradients for assessing the effect of the intermediate layer of the joint model on the output, and then the effect of the input on the intermediate layer.
+
+First we construct the baseline, which we move from towards the input, computing gradients along the way.
+
+```{python}
+# baseline is normal noise with mean and std from the data
+# vary these to see if we get different results...
+# scree plot
+lip_baseline = torch.randn_like(lip_tensor)*lip_tensor.std().numpy() + lip_tensor.mean().numpy()
+pro_baseline = torch.randn_like(pro_tensor)*pro_tensor.std().numpy() + pro_tensor.mean().numpy()
+metab_baseline = torch.randn_like(metab_tensor)*metab_tensor.std().numpy() + metab_tensor.mean().numpy()
+
+lip_baseline = -torch.rand_like(lip_tensor)/2# *2*liptest_pos.std().numpy() + liptest_pos.mean().numpy()
+pro_baseline = -torch.rand_like(pro_tensor)/2# *2*protest_pos.std().numpy() + protest_pos.mean().numpy()
+metab_baseline = -torch.rand_like(metab_tensor)/2# *2*metabtest_pos.std().numpy() + metabtest_pos.mean().numpy()
+
+# shuffle values of lip_baseline
+lip_baseline = lip_baseline[:,torch.randperm(lip_baseline.shape[1])]
+pro_baseline = pro_baseline[:,torch.randperm(pro_baseline.shape[1])]
+metab_baseline = metab_baseline[:,torch.randperm(metab_baseline.shape[1])]
+```
+
+We construct the same model, but with special 'hooks' to capture activations and gradients.
+
+```{python}
+last_hidden_size = 64
+
+lip_marg = simple_FC_hook(input_size=train_lip.shape[0], hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique())
+metab_marg = simple_FC_hook(input_size=train_metab.shape[0], hidden_sizes=[64, last_hidden_size], prediction_dim=y.nunique())
+pro_marg = simple_FC_hook(input_size=train_pro.shape[0], hidden_sizes=[256, last_hidden_size], prediction_dim=y.nunique())
+
+# joint model
+joint_model = JointMLP(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128, hooks=True)
+
+joint_model.load_state_dict(torch.load('../notebooks/joint_model_nb.pt'))
+```
+
+The `integrated_grads` function takes an 'activation_layer' and 'layer_depth' argument.  In the below example we are looking at the 'fc1' layer of the joint model ('combined').  The result gives us the integrated gradients for the input with respect to the intermediate layer, and the intermediate layer with respect to the output.
+
+```{python}
+joint_model.eval()
+
+result = integrated_grads(
+    [lip_tensor, metab_tensor, pro_tensor], 
+    [lip_baseline, metab_baseline, pro_baseline], 
+    joint_model, 
+    n_steps = 100, 
+    activation_layer = "fc1",
+    layer_depth = 'combined',
+    class_idx = 0 # regrettably, 0 represents the 'Virus' condition here, no I'm not going to fix it.
+)
+
+# straight from input to output
+lip_igrad_scores, metab_igrad_scores, pro_igrad_scores = integrated_grads(
+    [lip_tensor, metab_tensor, pro_tensor], 
+    [lip_baseline, metab_baseline, pro_baseline], 
+    joint_model, n_steps = 100, class_idx = 0 # regrettably, 0 represents the 'Virus' condition here, no I'm not going to fix it.
+)
+
+joint_input_igrads = result['input_igrads']
+joint_activation_igrads = result['activation_igrads']
+```
+
+```{python}
+# make a plot comparing overlayed density plots of the integrated gradients
+
+fig, axs = plt.subplots(1,2, figsize = (10, 5))
+
+sns.kdeplot(lip_igrad_scores.abs().flatten().numpy(), ax = axs[0], label = 'Lipids')
+sns.kdeplot(metab_igrad_scores.abs().flatten().numpy(), ax = axs[0], label = 'Metabolites')
+sns.kdeplot(pro_igrad_scores.abs().flatten().numpy(), ax = axs[0], label = 'Proteins')
+
+# cut off at 0.002
+axs[0].set_xlim(right = 0.002)
+
+# now for the joint
+sns.kdeplot(joint_input_igrads[0].abs().mean(axis=0).flatten().detach().numpy(), ax = axs[1], label = 'Lipids')
+sns.kdeplot(joint_input_igrads[1].abs().mean(axis=0).flatten().detach().numpy(), ax = axs[1], label = 'Metabolites')
+sns.kdeplot(joint_input_igrads[2].abs().mean(axis=0).flatten().detach().numpy(), ax = axs[1], label = 'Proteins')
+
+axs[1].set_xlim(right = 0.0001)
+
+fig.supxlabel('Integrated Gradient Magnitude')
+
+# get the labels and handles
+labels, handles = axs[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='upper right')
+
+fig.tight_layout()
+# fig.legend()
+```
+
+The resulting output can be used to identify the most important intermediate nodes, as well as what inputs are most important for those nodes according to the integrated gradients.  We also compare how many of each view (lipids, metabolites, proteins) are important for the intermediate layer, as well as how they compare with what is considered important when doing a straight input -> output analysis.
+
+```{python}
+# Getting the JOINT scores.  That is, for the combined layer ('fc1' of the top model)
+sorted_joint_scores = joint_activation_igrads.pow(2).sum(axis=0).argsort(descending = True)
+
+# each biomolecule individually
+sorted_joint_input_scores_lip = joint_input_igrads[0][sorted_joint_scores].pow(2).sum(axis=1).argsort(axis = 1, descending = True)
+
+sorted_joint_input_scores_metab = joint_input_igrads[1][sorted_joint_scores].pow(2).sum(axis=1).argsort(axis = 1, descending = True)
+
+sorted_joint_input_scores_pro = joint_input_igrads[2][sorted_joint_scores].pow(2).sum(axis=1).argsort(axis = 1, descending = True)
+
+# combined
+stacked_scores = torch.cat([joint_input_igrads[0], joint_input_igrads[1], joint_input_igrads[2]], axis = -1)
+
+# get the indices of the lipids, metabolites, and proteins in the stacked representation
+lipid_inds = torch.arange(0, joint_input_igrads[0].shape[-1])
+metab_inds = torch.arange(lipid_inds.shape[0], lipid_inds.shape[0] + joint_input_igrads[1].shape[-1])
+pro_inds = torch.arange(metab_inds[-1], metab_inds[-1] + joint_input_igrads[2].shape[-1])
+
+sorted_stacked_scores = stacked_scores[sorted_joint_scores].pow(2).sum(axis=1).argsort(axis = 1, descending = True)
+```
+
+```{python}
+# scores and sorted indices for straight input -> output for comparison
+abs_lip_igrads = lip_igrad_scores.abs().sum(axis = 0).numpy()
+abs_pro_igrads = pro_igrad_scores.abs().sum(axis = 0).numpy()
+abs_metab_igrads = metab_igrad_scores.abs().sum(axis = 0).numpy()
+
+sorted_lip_igrads = sorted(abs_lip_igrads, reverse = True)
+sorted_pro_igrads = sorted(abs_pro_igrads, reverse = True)
+sorted_metab_igrads = sorted(abs_metab_igrads, reverse = True)
+
+sorted_lip_inds_marginal = (-abs_lip_igrads).argsort()
+sorted_metab_inds_marginal = (-abs_metab_igrads).argsort()
+sorted_pro_inds_marginal = (-abs_pro_igrads).argsort()
+```
+
+```{python}
+top_n = 100
+N = sorted_stacked_scores.shape[1]
+K_metab = metab_inds.shape[0]
+K_pro = pro_inds.shape[0]
+K_lip = lipid_inds.shape[0]
+
+# the expected counts we would see in the top_n
+mean_metab = top_n*K_metab/N
+mean_pro = top_n*K_pro/N
+mean_lip = top_n*K_lip/N
+```
+
+```{python}
+# For the intermediate layer, which of the top_n most important are lipids, metabolites, and proteins?
+torch.isin(sorted_stacked_scores[:,:top_n], metab_inds).sum(axis=1) # metabolites have a few, more than expected
+torch.isin(sorted_stacked_scores[:,:top_n], lipid_inds).sum(axis=1) # lipids has almost none
+torch.isin(sorted_stacked_scores[:,:top_n], pro_inds).sum(axis=1) # proteins the most, but lower than expected on average:
+(torch.isin(sorted_stacked_scores[:,:top_n], pro_inds).sum(axis=1) - mean_pro).mean()
+```
+
+```{python}
+# check membership of the most important for these neurons in the set of most important for the output
+np.isin(sorted_joint_input_scores_lip[:,:20], sorted_lip_inds_marginal[:20]).sum(axis=1)
+np.isin(sorted_joint_input_scores_metab[:,:20], sorted_metab_inds_marginal[:20]).sum(axis=1)
+np.isin(sorted_joint_input_scores_pro[:,:20], sorted_pro_inds_marginal[:20]).sum(axis=1)
+
+# compare shap values and igrads
+sorted_joint_shap = torch.tensor(shap_values[0][0]).pow(2).sum(axis=0).argsort(descending = True)
+np.intersect1d(sorted_joint_shap[:50], sorted_joint_scores[:50]).shape
+```

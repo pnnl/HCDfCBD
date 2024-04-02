@@ -4,12 +4,16 @@ jupyter: python3
 ---
 
 ```{python}
+import sys
+sys.path.append('../')
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 
 from diomics.models.fc_imv import FC_Marginal, JointVAE
+from diomics.models.multi_mlp import simple_FC, JointMLP
 
 import numpy as np
 import pandas as pd
@@ -19,8 +23,6 @@ from sklearn.metrics import roc_curve, auc, confusion_matrix
 
 import matplotlib.pyplot as plt
 ```
-
-
 
 ```{python}
 # two arbitrary views, one with 1000 features, and another with 500 features
@@ -168,7 +170,9 @@ ytrain = y.iloc[train_inds]
 ytest = y.iloc[test_inds]
 ```
 
-### Construct the Model
+### Construct and train the Models
+
+I'll first compare the 'mean mlp' with the variational autoencoder variant from the paper.
 
 ```{python}
 # three view-specific encoders with the appropriate input size:
@@ -177,10 +181,146 @@ metab_marg = FC_Marginal(input_size=train_metab.shape[0], hidden_sizes=[64, 64],
 pro_marg = FC_Marginal(input_size=train_pro.shape[0], hidden_sizes=[256, 128], z_dim=10, prediction_dim=y.nunique())
 
 # joint model
-joint_model = JointVAE(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128)
+joint_vae = JointVAE(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128)
+
+last_hidden_size = 64
+
+lip_marg_mlp = simple_FC(input_size=train_lip.shape[0], hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique())
+metab_marg_mlp = simple_FC(input_size=train_metab.shape[0], hidden_sizes=[64, last_hidden_size], prediction_dim=y.nunique())
+pro_marg_mlp = simple_FC(input_size=train_pro.shape[0], hidden_sizes=[256, last_hidden_size], prediction_dim=y.nunique())
+
+# joint model
+joint_mlp = JointMLP(marginal_models=[lip_marg_mlp, metab_marg_mlp, pro_marg_mlp], hidden_dim=128, hooks=False)
 
 # define optimizer
-optimizer = AdamW(joint_model.parameters(), lr=1e-3)
+optimizer_vae = AdamW(joint_vae.parameters(), lr=1e-4)
+
+# define optimizer
+optimizer_mlp = AdamW(joint_mlp.parameters(), lr=1e-4)
+
+(sum([p.numel() for p in joint_vae.parameters()]), sum([p.numel() for p in joint_mlp.parameters()]))
+```
+
+```{python}
+# turn data into tensors
+lip_tensor = torch.tensor(train_lip.T.values, dtype=torch.float32)
+pro_tensor = torch.tensor(train_pro.T.values, dtype=torch.float32)
+metab_tensor = torch.tensor(train_metab.T.values, dtype=torch.float32)
+
+y_gt = ytrain.astype('category').cat.codes
+y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+
+train_acc_vae = []
+train_acc_mlp = []
+test_acc_vae = []
+test_acc_mlp = []
+
+ytest_gt = ytest.astype('category').cat.codes
+
+liptest_tensor = torch.tensor(test_lip.T.values, dtype=torch.float32)
+protest_tensor = torch.tensor(test_pro.T.values, dtype=torch.float32)
+metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
+
+for i in range(3500):
+    views = [lip_tensor, metab_tensor, pro_tensor]
+    
+    # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
+    yhat, poe_dist, yhats, dists = joint_vae(views)
+
+    loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists, var_beta = 0.01)
+
+    optimizer_vae.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(joint_vae.parameters(), 2.0)
+    optimizer_vae.step()
+
+    train_acc_vae.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
+    
+    with torch.inference_mode():
+        yhat, poe_dist, yhats, dists = joint_vae([liptest_tensor, metabtest_tensor, protest_tensor])
+
+    test_acc_vae.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
+
+    # update the mlp
+    yhat, h, yhats, hiddens = joint_mlp(views)
+
+    # pass the predictions and distributions to the loss function and update parameters
+    _, _, loss = joint_mlp.loss(y_gt, yhat, yhats)
+
+    optimizer_mlp.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(joint_mlp.parameters(), 2.0)
+    optimizer_mlp.step()
+
+    train_acc_mlp.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
+
+    with torch.inference_mode():
+        yhat, h, yhats, hiddens = joint_mlp([liptest_tensor, metabtest_tensor, protest_tensor])
+
+    test_acc_mlp.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
+
+    print(f'Epoch {i+1} loss: {loss.item():.3f}')
+```
+
+```{python}
+import pickle
+training_accs = {
+    "train_acc_vae": train_acc_vae,
+    "test_acc_vae": test_acc_vae,
+    "train_acc_mlp": train_acc_mlp,
+    "test_acc_mlp": test_acc_mlp
+}
+pickle.dump(training_accs, open("training_accs_mlp_v_vae_beta1.p", "wb"))
+```
+
+### Plot the difference in performance between the vae and simple mlp.
+
+```{python}
+def moving_average(x, w):
+    return np.convolve(x, np.ones(w), 'valid') / w
+
+train_acc_vae_ma = moving_average(train_acc_vae, 10)
+test_acc_vae_ma = moving_average(test_acc_vae, 10)
+train_acc_mlp_ma = moving_average(train_acc_mlp, 10)
+test_acc_mlp_ma = moving_average(test_acc_mlp, 10)
+```
+
+```{python}
+fig, axs = plt.subplots(2,2, figsize = (10, 10))
+
+axs[0,0].plot(train_acc_vae_ma, label = 'Train VAE')
+axs[0,0].set_title('Train VAE')
+axs[0,1].plot(test_acc_vae_ma, label = 'Test VAE')
+axs[0,1].set_title('Test VAE')
+axs[1,0].plot(train_acc_mlp_ma, label = 'Train MLP')
+axs[1,0].set_title('Train MLP')
+axs[1,1].plot(test_acc_mlp_ma, label = 'Test MLP')
+axs[1,1].set_title('Test MLP')
+```
+
+```{python}
+fig, axs = plt.subplots(2,2, figsize = (10, 10))
+
+axs[0,0].scatter(range(len(train_acc_vae)), train_acc_vae, label = 'Train VAE')
+axs[0,1].scatter(range(len(test_acc_vae)), test_acc_vae, label = 'Test VAE')
+axs[1,0].scatter(range(len(train_acc_mlp)), train_acc_mlp, label = 'Train MLP')
+axs[1,1].scatter(range(len(test_acc_mlp)), test_acc_mlp, label = 'Test MLP')
+
+fig.legend()
+```
+
+### Regular training of a single model
+
+```{python}
+lip_marg = FC_Marginal(input_size=train_lip.shape[0], hidden_sizes=[128, 128], z_dim=10, prediction_dim=y.nunique())
+metab_marg = FC_Marginal(input_size=train_metab.shape[0], hidden_sizes=[64, 64], z_dim=10, prediction_dim=y.nunique())
+pro_marg = FC_Marginal(input_size=train_pro.shape[0], hidden_sizes=[256, 128], z_dim=10, prediction_dim=y.nunique())
+
+# joint model
+joint_vae = JointVAE(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128)
+
+# define optimizer
+optimizer_vae = AdamW(joint_vae.parameters(), lr=1e-4)
 ```
 
 ```{python}

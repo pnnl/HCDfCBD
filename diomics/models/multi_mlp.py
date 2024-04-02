@@ -54,6 +54,59 @@ class simple_FC(nn.Module):
         preds = F.softmax(preds, dim=-1)
         
         return preds, h
+
+class simple_FC_hook(simple_FC):
+    """
+    A simple MLP for a single view of the multi-view model with hooks to retrieve gradient computations.
+
+    Attributes:
+        input_size (int): The number of input features
+        hidden_sizes (List[int]): The number of hidden units in each layer
+        prediction_dim (int): The number of output classes
+        dropout (float, optional): The dropout rate. Defaults to 0.2.
+        fc1 (nn.Linear): The first fully connected layer after the input
+        fc{j} (nn.Linear): The j-th fully connected layer after the input layer
+        fc_out (nn.Linear): The layer that maps the (sampled) latent representation to the output classes
+        activations (Dict[str, torch.Tensor]): A dictionary of activations for model layers
+        activations_grad (Dict[str, torch.Tensor]): A dictionary of gradients for model layers
+    """
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize the FC_Marginal model
+
+        Args:
+            input_size (int): The number of input features
+            hidden_sizes (List[int]): The number of hidden units in each layer
+            prediction_dim (int): The number of output classes
+            dropout (float, optional): The dropout rate. Defaults to 0.2.
+        """
+        super().__init__(*args, **kwargs)
+        self.fc1.register_forward_hook(self.get_activation('fc1'))
+        self.activations = {}
+        self.activations_grad = {}
+
+    def get_activation(self, name):
+        def hook(model, input, output):
+            self.activations[name] = output
+        return hook
+
+    def get_activation_grad(self, name):
+        def hook(grad):
+            self.activations_grad[name] = grad
+        return hook
+
+    def forward(self, x):
+        h = self.dropout(F.relu(self.fc1(x)))
+
+        h.register_hook(self.get_activation_grad('fc1'))
+
+        for sz in range(1, len(self.hidden_sizes)):
+            h = self.dropout(F.relu(getattr(self, f'fc{sz+1}')(h)))
+        
+        preds = self.dropout(self.fc_out(h))
+        preds = F.softmax(preds, dim=-1)
+        
+        return preds, h
     
 class JointMLP(nn.Module):
     """
@@ -65,7 +118,7 @@ class JointMLP(nn.Module):
         fc2 (nn.Linear): The second fully connected layer, immediately after fc1
         dropout (nn.Dropout): A dropout layer
     """
-    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, dropout: float = 0.2):
+    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, dropout: float = 0.2, hooks = False):
         """
         Initialize the JointMLP model
 
@@ -80,6 +133,23 @@ class JointMLP(nn.Module):
         self.fc1 = nn.Linear(marginal_models[0].hidden_sizes[-1], hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
+        self.hooks = hooks
+
+        if self.hooks:
+            self.activations = {}
+            self.activations_grad = {}
+
+            self.fc1.register_forward_hook(self.get_activation('fc1'))
+
+    def get_activation(self, name):
+        def hook(model, input, output):
+            self.activations[name] = output
+        return hook
+
+    def get_activation_grad(self, name):
+        def hook(grad):
+            self.activations_grad[name] = grad
+        return hook
 
     def forward(self, x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
@@ -105,6 +175,10 @@ class JointMLP(nn.Module):
         h = torch.mean(torch.stack(hiddens), dim=0)
 
         h = self.dropout(F.relu(self.fc1(h)))
+
+        if self.hooks:
+            h.register_hook(self.get_activation_grad('fc1'))
+
         yhat = F.softmax(self.fc2(h), dim=-1)
 
         return yhat, h, yhats, hiddens
