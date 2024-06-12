@@ -52,6 +52,9 @@ def igrad_beeswarm_plot(
         ylabel (str, optional): Y label. Defaults to "Lipids".
         title (str, optional): Title. Defaults to "".
         size (int, optional): Size of the scatter points. Defaults to 4.
+
+    Return:
+        None, plots a beeswarm plot.
     """
 
     bin = np.linspace(min(plot_df[raw_val_name]),max(plot_df[raw_val_name]),60)
@@ -77,3 +80,54 @@ def igrad_beeswarm_plot(
 
     plt.show()
     
+def facet_force_plots(scores, values, axs, names = None, top_n = 10, zeroline = True):
+    """Plot the aggregate feature importance for the top features across several outputs
+
+    Args:
+        scores (List[np.ndarray]): A list of n_samples x n_features numpy arrays of feature importance scores.
+        values (pd.DataFrame): A pandas dataframe of the raw input values, of the same shape as each element of scores.
+        axs (np.ndarray): A numpy array of axes to plot the feature importances on.
+        names (_type_, optional): Names for each of the outputs, correponding to the elements of `scores`. Defaults to None.
+        top_n (int, optional): The number of top features to plot for each output. Defaults to 10.
+        zeroline (bool, optional): Whether to add a vertical line at zero. Defaults to True.
+
+    Returns:
+        None: Plots the feature importances on the axes.
+    """
+
+    # all scores and values must have consistent shapes
+    for s in scores:
+        if tuple(s.shape) != tuple(values.shape):
+            raise ValueError("Not all tensors in scores and values were the same shape")
+    
+    if len(np.unique([s.shape[0] for s in scores])) != 1:
+        raise ValueError("Not all scores had the same number of observations")
+
+    if len(axs.ravel()) != len(scores):
+        raise ValueError("Not enough axes to plot all datasets")
+
+    abs_scores = [np.abs(s).mean(axis=0) for s in scores]
+    scores_argsort = [s.argsort()[::-1] for s in abs_scores]
+    nsamps = scores[0].shape[0]
+    nfeats = scores[0].shape[1]
+
+    corrs = [np.corrcoef(s, values, rowvar=False) for s in scores]
+    # get the cross-correlations
+    signs = [c[0:nfeats, nfeats:].diagonal() for c in corrs]
+
+    topn_scores = [(score * sign)[order][:top_n] for score, sign, order in zip(abs_scores, signs, scores_argsort)]
+
+    topn_features = [values.columns[order][:top_n] for order in scores_argsort]
+
+    if names is None:
+        names = range(len(scores))
+
+    for name, scores, features, ax in zip(names, topn_scores, topn_features, axs.ravel()):
+        sns.barplot(x = scores, y = features, ax = ax)
+        ax.set_title(name)
+        ax.set_ylabel(None)
+
+    # add a vertical line at zero
+    if zeroline:
+        for ax in axs.flatten():
+            ax.axvline(0, color = 'black', linestyle = '--', alpha = 0.5)

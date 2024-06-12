@@ -182,6 +182,9 @@ def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None)
         yhat (torch.Tensor): Prediction probabilities for the labels
         dist (torch.distributions.Normal): The distribution of the latent variable
         var_beta (float, optional): The weight of the KL divergence term. Defaults to 1.
+        focal (bool, optional): Whether to use focal loss. Defaults to True.
+        gamma (float, optional): The focal loss gamma parameter. Defaults to 2.
+        alpha (torch.Tensor, optional): A tensor with number of elements equal to the number of classes, specifying class weights. Defaults to None.
 
     Returns:
         torch.Tensor: The variational loss
