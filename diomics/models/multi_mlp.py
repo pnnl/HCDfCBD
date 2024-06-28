@@ -120,7 +120,7 @@ class JointMLP(nn.Module):
         fc2 (nn.Linear): The second fully connected layer, immediately after fc1
         dropout (nn.Dropout): A dropout layer
     """
-    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, activation_fn = F.relu, dropout: float = 0.2, hooks = False):
+    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, activation_fn = F.relu, dropout: float = 0.2, combine_fn = "mean", hooks = False):
         """
         Initialize the JointMLP model
 
@@ -131,8 +131,15 @@ class JointMLP(nn.Module):
         """
         super().__init__()
         self.margin_models = torch.nn.ModuleList(marginal_models)
-        assert len(set([m.hidden_sizes[-1] for m in self.margin_models])) == 1, "All models must have the same last hidden size"
-        self.fc1 = nn.Linear(marginal_models[0].hidden_sizes[-1], hidden_dim)
+
+        if combine_fn == 'mean':
+            assert len(set([m.hidden_sizes[-1] for m in self.margin_models])) == 1, "If mean combining, all models must have the same last hidden size"
+            dim_fc1_in = marginal_models[0].hidden_sizes[-1]
+        elif combine_fn == 'concat':
+            dim_fc1_in = sum([m.hidden_sizes[-1] for m in self.margin_models])
+            
+        self.combine_fn = combine_fn
+        self.fc1 = nn.Linear(dim_fc1_in, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
         self.activation_fn = activation_fn
@@ -175,7 +182,10 @@ class JointMLP(nn.Module):
             yhats.append(yhat)
             hiddens.append(h)
 
-        h = torch.mean(torch.stack(hiddens), dim=0)
+        if self.combine_fn == 'mean':
+            h = torch.mean(torch.stack(hiddens), dim=0)
+        elif self.combine_fn == 'concat':
+            h = torch.cat(hiddens, dim=-1)
 
         h = self.dropout(self.activation_fn(self.fc1(h)))
 
@@ -231,19 +241,23 @@ class JointMLP(nn.Module):
 
         return product_loss, marginal_losses, product_loss + loss
 
-def make_joint_model(datas, prediction_dim, hidden_sizes, dropout, hidden_dim):
+def make_joint_model(datas, prediction_dim, hidden_sizes, dropout, hidden_dim, activation_fn=F.relu, combine_fn='concat'):
     """
-    Create a joint model from a list of marginal models
+    Create a joint model for multiple views.  Each view gets its own 'marginal model', and then there is a fusion model that takes the output of each marginal model and combines them.
 
     Args:
-        datas (List[torch.Tensor]): A list of tensors, each representing a view of the data
+        datas (List[torch.Tensor]): A list of tensors, each representing a view
         prediction_dim (int): The number of output classes
-        hidden_sizes (List[int]): The number of hidden units in each layer
+        hidden_sizes (List[List[int]]): A list of hidden sizes for each marginal model
         dropout (float): The dropout rate
-        hidden_dim (int): The number of hidden units between fc1 and fc2
+        hidden_dim (int): The number of hidden units between fc1 and fc2 of the combination model.
+        activation_fn (torch.nn.functional): The activation function
+        combine_fn (str, optional): The method to combine the marginal models. Defaults to 'concat'.
+
     Returns:
         JointMLP: The joint model
     """
+
     marginal_models = []
 
     for k in range(len(datas)):
@@ -252,11 +266,12 @@ def make_joint_model(datas, prediction_dim, hidden_sizes, dropout, hidden_dim):
             input_size = input_size, 
             hidden_sizes = hidden_sizes[k], 
             prediction_dim = prediction_dim,
-            dropout = dropout
+            dropout = dropout,
+            activation_fn = activation_fn
         )
         marginal_models.append(mmod)
 
     # joint model
-    joint_model = JointMLP(marginal_models=marginal_models, hidden_dim=hidden_dim)
+    joint_model = JointMLP(marginal_models=marginal_models, hidden_dim=hidden_dim, activation_fn=activation_fn, combine_fn = combine_fn)
 
     return joint_model

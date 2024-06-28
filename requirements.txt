@@ -2,6 +2,6 @@ numpy
 pandas
 scikit-learn
 torch==2.0.1
-shap
+shap==0.4.3
 seaborn
 matplotlib
