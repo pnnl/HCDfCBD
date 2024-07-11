@@ -300,6 +300,7 @@ def run_experiment(args):
         
     # SHAPley values
     if args.get('shapley', False):
+        all_data_tensors = [torch.tensor(d.values, dtype=torch.float32) for d in train_X_list]
         shap_values = run_shapley(joint_model, train_tensors, train_X_list, cat_names, args)
 
     # Integrated gradients
@@ -327,17 +328,17 @@ def run_experiment(args):
                     'IGrad_score': sorted_igrad_scores[i]
                 })
 
-                scores_df = pd.DataFrame(all_igrad_scores[i].T, columns=train_X_list[i].index)
+                scores_df = pd.DataFrame(tmp_igrad_scores[i].T, columns=train_X_list[i].index)
                 scores_df.index = train_X_list[i].columns
 
                 tmp_df = tmp_df.merge(scores_df, how = 'left', left_on='feature', right_index=True)
                 out_dataframes_igrad.append(tmp_df)
 
-                igrad_path = os.path.join(args['output_dir'], f'integrated_gradients_{fname}_{class_idx}.csv')
+                igrad_path = os.path.join(args['output_dir'], f'integrated_gradients_{os.path.basename(fname)}_{class_idx}.csv')
                 tmp_df.to_csv(igrad_path, index=False)
                 mlflow.log_artifact(igrad_path)
 
-        igrads_path = os.path.join(args['output_dir'], f'igrad_scores_{cat_name}.pkl')
+        igrads_path = os.path.join(args['output_dir'], f'igrad_scores.pkl')
         pickle.dump(all_igrad_scores, open(igrads_path, 'wb'))
         mlflow.log_artifact(igrads_path)
 
@@ -364,7 +365,7 @@ def run_experiment(args):
                     subsets_by_idx_test[f"igrads_{cat_name}_{prop}"] = sset_test
 
     if args.get("eval_clustering", False):
-        if args.get('shapley', False):
+        if args.get('shapley', False) or args.get('igrads', False):
             for k, v in subsets_by_idx.items():
                 X = np.concatenate([el.numpy() for el in v], axis=1)
                 kmeans = KMeans(n_clusters=len(cat_names), random_state=0).fit(X)
@@ -388,7 +389,7 @@ def run_experiment(args):
                 mlflow.log_artifact(agglom_path)
 
     if args.get("eval_prediction", False):
-        if args.get('shapley'):
+        if args.get('shapley') | args.get('igrads'):
             for k, v in subsets_by_idx.items():
                 # train a classifier on the subsetted data
                 X = np.concatenate([el.numpy() for el in v], axis=1)
@@ -416,7 +417,11 @@ def run_experiment(args):
 
                 ACC_TEST = (ypred == ytest_gt.numpy()).mean()
                 CONFUSION_TEST = confusion_matrix(ytest_gt, ypred)
-                AUC_TEST = roc_auc_score(ytest_gt, yprob, multi_class='ovr')
+
+                if yprob.shape[1] > 2:
+                    AUC_TEST = roc_auc_score(ytest_gt, yprob, multi_class='ovr')
+                else:
+                    AUC_TEST = roc_auc_score(ytest_gt, yprob[:, 1])
 
                 mlflow.log_metric(f"test_accuracy_RF_{k}", ACC_TEST)
                 mlflow.log_metric(f"test_auc_RF_{k}", AUC_TEST)
@@ -463,7 +468,7 @@ def run_shapley(joint_model, train_tensors, train_X_list, cat_names, args):
             tmp_df = tmp_df.merge(scores_df, how = 'left', left_on='feature', right_index=True)
             out_dataframes_shap.append(tmp_df)
 
-            shap_csv_path = os.path.join(args['output_dir'], 'shapley_values_{}_{}.csv'.format(fname, cat_name))
+            shap_csv_path = os.path.join(args['output_dir'], 'shapley_values_{}_{}.csv'.format(os.path.basename(fname), cat_name))
 
             tmp_df.to_csv(shap_csv_path, index=False)
             

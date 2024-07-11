@@ -1,8 +1,0 @@
-# @package _global_
-# @package hydra.sweeper
-_target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
-max_batch_size: null
-params:
-  hidden_sizes: "[[128, 64], [128, 64], [512, 256, 64]], [[128, 32], [128, 32], [512, 256, 64]], [[128, 16], [128, 16], [512, 256, 64]], [[256, 128, 16], [256, 128, 16], [512, 256, 64]], [[256, 128, 16], [256, 128, 16], [512, 256, 16]]"
-  combine_fn: "concat"
-  hidden_dim: 128, 256

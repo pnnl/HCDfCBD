@@ -1,9 +1,9 @@
 do_train: true
 do_eval: true
 data_dir: /Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024
-train_data_paths: [lip_neg_train.csv, metab_train.csv, pro_train.csv]
-test_data_paths: [lip_neg_test.csv, metab_test.csv, pro_test.csv]
-fdata_paths: [lip_fdata_mlready.csv, metab_fdata_mlready.csv, pro_fdata_mlready.csv]
+train_data_paths: [metab_train.csv, lip_neg_train.csv, pro_train.csv]
+test_data_paths: [metab_test.csv, lip_neg_test.csv, pro_test.csv]
+fdata_paths: [metab_fdata_mlready.csv, lip_fdata_mlready.csv, pro_fdata_mlready.csv]
 hidden_sizes: [[128, 64], [128, 64], [128, 64]]
 activation_fn:
   _target_: hydra.utils.get_method
@@ -26,5 +26,5 @@ max_iter: 5000
 eval_clustering: true
 eval_prediction: true
 top_n: [0.1, 0.25, 0.5, 0.75, 1.0]
-experiment_name: 0
+experiment_name: default
     
