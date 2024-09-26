@@ -93,7 +93,12 @@ def train_joint_model(
 
         optimizer.zero_grad()
 
-        loss.backward()
+        if args['marginal_loss']:
+            loss.backward()
+        else:
+            loss = product_loss
+            loss.backward()
+
         # torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
         optimizer.step()
 
@@ -134,7 +139,7 @@ def train_joint_model(
             joint_model.train()
 
         # set the tqdm message:
-        pbar.set_description(f'Iteration {i}, training loss: {loss.item():.3f} validation loss: {valid_loss.item():.3f} best validation loss: {best_valid_loss.item():.3f}')
+        pbar.set_description(f'Iteration {i}, training loss: {loss.item():.5f} validation loss: {valid_loss.item():.5f} best validation loss: {best_valid_loss.item():.5f}')
 
         train_loss_list.append(loss.item())
         mlflow.log_metric(f"{mlflow_stage}_training_loss", loss.item(), step=i)
@@ -255,7 +260,8 @@ def run_experiment(args):
             prediction_dim = train_y.nunique(), 
             hidden_sizes = args['hidden_sizes'], 
             dropout = args['dropout'], 
-            hidden_dim = args['hidden_dim']
+            hidden_dim = args['hidden_dim'],
+            combine_fn = args['combine_fn']
         )
 
         optimizer = AdamW(joint_model.parameters(), lr=5e-5)

@@ -161,7 +161,7 @@ class JointMLP(nn.Module):
             self.activations_grad[name] = grad
         return hook
 
-    def forward(self, x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+    def forward(self, *x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
 
         yhats = []
@@ -223,23 +223,21 @@ class JointMLP(nn.Module):
             product_loss = torch.pow(1 - yhat.gather(1, y.view(-1, 1)), gamma).view(-1) * product_loss
             marginal_losses = [torch.pow(1 - yh.gather(1, y.view(-1, 1)), gamma).view(-1) * m for yh, m in zip(yhats, marginal_losses)]
         
-        # import pdb; pdb.set_trace()
         product_loss = torch.mean(product_loss)
         marginal_losses = [torch.mean(m) for m in marginal_losses]
 
         if marginal_weight is not None:
             if marginal_coefs is None:
                 marginal_coefs = [1.0] * len(marginal_losses)
-            marginal_losses = [m * marginal_weight for m in marginal_coefs]
+            marginal_losses = [m * l for m,l in zip(marginal_coefs, marginal_losses)]
 
             avg_marginal_loss = sum(marginal_losses)/len(marginal_losses)
-            marginal_scale_factor = product_loss*marginal_weight/avg_marginal_loss
 
-            loss = product_loss + marginal_scale_factor*sum(marginal_losses)
+            loss = product_loss + marginal_weight*avg_marginal_loss
         else:
-            loss = product_loss + sum(marginal_losses) 
+            loss = product_loss + sum(marginal_losses)/len(marginal_losses) 
 
-        return product_loss, marginal_losses, product_loss + loss
+        return product_loss, marginal_losses, loss
 
 def make_joint_model(datas, prediction_dim, hidden_sizes, dropout, hidden_dim, activation_fn=F.relu, combine_fn='concat'):
     """

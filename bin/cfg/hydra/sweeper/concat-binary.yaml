@@ -7,3 +7,4 @@ params:
   combine_fn: "concat"
   hidden_dim: 64, 32
   data_dir: /Users/clab683/git_repos/DeepIMV/data/ICL104-binary
+  experiment_name: icl-binary

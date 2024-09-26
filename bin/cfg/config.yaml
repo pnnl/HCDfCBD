@@ -9,10 +9,12 @@ activation_fn:
   _target_: hydra.utils.get_method
   path: torch.nn.functional.tanh
 combine_fn: 'mean'
+learning_rate: 0.0001
 dropout: 0.2
 hidden_dim: 128
 alpha: null
 gamma: 2
+marginal_loss: true
 marginal_coefs: null
 marginal_weight: null
 shapley: true
