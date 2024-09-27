@@ -210,3 +210,37 @@ def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None)
     else:
         ce = ce.sum()
         return torch.mean(ce + var_beta * kl)        
+
+def make_joint_vae(datas, prediction_dim, hidden_sizes, z_dim, hidden_dim, dropout=0.2):
+    """
+    Create a joint model for multiple views.  Each view gets its own 'marginal model', and then there is a fusion model that takes the output of each marginal model and combines them.
+
+    Args:
+        datas (List[torch.Tensor]): A list of tensors, each representing a view
+        prediction_dim (int): The number of output classes
+        hidden_sizes (List[List[int]]): A list of hidden sizes for each marginal model
+        z_dim (int): The dimensionality of the latent representation
+        dropout (float): The dropout rate
+        hidden_dim (int): The number of hidden units between fc1 and fc2 of the combination model.
+
+    Returns:
+        JointVAE: The joint model
+    """
+
+    marginal_models = []
+
+    for k in range(len(datas)):
+        input_size = datas[k].shape[1]
+        mmod = FC_Marginal(
+            input_size = input_size, 
+            hidden_sizes = hidden_sizes[k], 
+            z_dim = z_dim,
+            prediction_dim = prediction_dim,
+            dropout = dropout
+        )
+        marginal_models.append(mmod)
+
+    # joint model
+    joint_model = JointVAE(marginal_models=marginal_models, hidden_dim=hidden_dim, dropout = dropout)
+
+    return joint_model
