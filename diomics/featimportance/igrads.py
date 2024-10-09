@@ -20,7 +20,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
     if activation_layer is None:
         grads = [torch.zeros_like(v) for v in baselines]
     else:
-        yhat, poe_dist, yhats, dists = model(views)
+        yhat, poe_dist, yhats, dists = model(*views)
         yhat[:,class_idx].mean().backward()
 
         if layer_depth == 'marginal':
@@ -32,7 +32,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
             tmp = [b.requires_grad_() for b in tmp]
 
             # get baseline activations and gradients
-            yhat, poe_dist, yhats, dists = model(tmp)
+            yhat, poe_dist, yhats, dists = model(*tmp)
             yhat[:,class_idx].mean().backward(retain_graph = True)
 
             baseline_activations = [afunc(m.activations[activation_layer]) for m in model.margin_models]
@@ -54,7 +54,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
             tmp = [b.requires_grad_() for b in tmp]
 
             # get baseline activations and gradients
-            yhat, poe_dist, yhats, dists = model(tmp)
+            yhat, poe_dist, yhats, dists = model(*tmp)
             yhat[:,class_idx].mean().backward(retain_graph = True)
 
             baseline_activations = afunc(model.activations[activation_layer])
@@ -77,7 +77,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
 
             tmp = [b + (i/n_steps) * (vtest - b) for b, vtest in zip(tmp, views)]
             tmp = [b.requires_grad_() for b in tmp]
-            yhat, poe_dist, yhats, dists = model(tmp)
+            yhat, poe_dist, yhats, dists = model(*tmp)
             yhat[:,class_idx].mean().backward()
             grads = [g + b.grad for g, b in zip(grads, tmp)]
 
@@ -89,7 +89,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
                 tmp = [b + (i/n_steps) * (vtest - b) for b, vtest in zip(tmp, views)]
                 tmp = [b.requires_grad_() for b in tmp]
 
-                yhat, poe_dist, yhats, dists = model(tmp)
+                yhat, poe_dist, yhats, dists = model(*tmp)
                 yhat[:,class_idx].mean().backward(retain_graph=True)
 
                 grads = [g + m.activations_grad[activation_layer] for g, m in zip(grads, model.margin_models)]
@@ -112,7 +112,7 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
                 tmp = [b + (i/n_steps) * (vtest - b) for b, vtest in zip(tmp, views)]
                 tmp = [b.requires_grad_() for b in tmp]
 
-                yhat, poe_dist, yhats, dists = model(tmp)
+                yhat, poe_dist, yhats, dists = model(*tmp)
                 yhat[:,class_idx].mean().backward(retain_graph=True)
 
                 grads = grads + model.activations_grad[activation_layer]
@@ -137,3 +137,28 @@ def integrated_grads(views, baselines, model, n_steps = 100, class_idx = 1, acti
 
 # need to get hooks to get activation of the target layer for each view as well as each baseline
 # then extract the gradients from that layer and do the usual.
+
+def average_igrads(views, model, cat_names, baselines = None, n_runs = 20, n_steps = 100, **kwargs):
+    all_scores = [{} for _ in range(len(views))]
+
+    for i in range(n_runs):
+        for class_idx, name in enumerate(cat_names):
+            # should make this high signal-to-noise
+            if baselines is None:
+                baselines = [t + torch.randn_like(t)*t.std()*2 for t in views]
+            else:
+                baselines = [b + torch.randn_like(b)*b.std()*2 for b in baselines]
+
+            igrads_out = integrated_grads(
+                views, 
+                baselines, 
+                model, 
+                n_steps = n_steps, 
+                class_idx = class_idx,
+                **kwargs
+            )
+
+            for j, res_dict in enumerate(all_scores):
+                res_dict.setdefault(name, []).append(igrads_out[j])
+
+    return all_scores
