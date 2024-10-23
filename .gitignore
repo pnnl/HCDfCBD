@@ -2,6 +2,25 @@ __pycache__
 *.py[cod]
 *$py.class
 
+# misc
+untracked/
+
+# ipynb
+notebooks/*
+!notebooks/data_processing_TCGA.qmd
+!notebooks/deep_imv_example.qmd
+!notebooks/feature_importance.qmd
+!notebooks/feature_importance_intermediate.qmd
+!notebooks/deep_imv_view_missing.qmd
+!notebooks/fake_edata_experiments.qmd
+!notebooks/inspect_mlflow_runs.qmd
+
+# hydra/mlflow
+multirun
+mlruns
+
+*.gz
+
 # Distribution / packaging 
 .Python build/ 
 develop-eggs/ 
@@ -89,7 +108,6 @@ GitHub.sublime-settings
 
 *.rds
 *.R
-*.py
 *.txt
 
 docs/build

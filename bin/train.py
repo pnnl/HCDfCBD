@@ -5,7 +5,6 @@ from torch.optim import AdamW
 
 from diomics.models.multi_mlp import make_joint_model
 from diomics.featimportance.igrads import integrated_grads
-from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df, facet_force_plots
 from diomics.featimportance.shapley import JointMLPWrapper
 
 import shap
@@ -18,18 +17,13 @@ import os
 import re
 import json
 import pickle
+import tempfile
 
 from sklearn.metrics import roc_auc_score, confusion_matrix, v_measure_score
 from sklearn.model_selection import StratifiedShuffleSplit, GridSearchCV
 from sklearn.cluster import KMeans, AgglomerativeClustering
-from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
-from scipy.stats import weightedtau
 
-# get cross validation score from sklearn
-from sklearn.model_selection import cross_val_score
-
-import argparse
 from tqdm import tqdm
 import mlflow
 import hydra
@@ -84,7 +78,7 @@ def train_joint_model(
         y_gt = y_gt[train_idx]
 
     for i in pbar:
-        yhat, h, yhats, hiddens = joint_model(train_tensors)
+        yhat, h, yhats, hiddens = joint_model(*train_tensors)
 
         product_loss, marginal_losses, loss = joint_model.loss(
             y_gt, yhat, yhats, alpha=args['alpha'], gamma=args['gamma'],
@@ -107,7 +101,7 @@ def train_joint_model(
             assert valid_tensors is not None and y_gt_valid is not None, "Validation tensors and ground truth must be provided if do_validation is True"
             joint_model.eval()
 
-            yhat_valid, h_valid, yhats_valid, hiddens_valid = joint_model(valid_tensors)
+            yhat_valid, h_valid, yhats_valid, hiddens_valid = joint_model(*valid_tensors)
             _, _, valid_loss = joint_model.loss(
                 y_gt_valid, yhat_valid, yhats_valid,
                 alpha=args['alpha'], gamma=args['gamma'],
@@ -261,6 +255,7 @@ def run_experiment(args):
             hidden_sizes = args['hidden_sizes'], 
             dropout = args['dropout'], 
             hidden_dim = args['hidden_dim'],
+            activation_fn = args['activation_fn'],
             combine_fn = args['combine_fn']
         )
 
@@ -275,8 +270,17 @@ def run_experiment(args):
         joint_model = out['joint_model']
 
         # save the pytorch model
-        torch.save(joint_model.state_dict(), args['final_model_path'])
-        mlflow.log_artifact(args['final_model_path'])
+        if args['final_model_path'] is None:
+            # save to a temp path
+            with tempfile.TemporaryDirectory() as tempdir:
+                os.makedirs(tempdir, exist_ok=True)
+                model_path = os.path.join(tempdir, "final_model.pt")
+            
+                torch.save(joint_model.state_dict(), model_path)
+                mlflow.log_artifact(model_path)
+        else:
+            torch.save(joint_model.state_dict(), args['final_model_path'])
+            mlflow.log_artifact(args['final_model_path'])
     else:
         # load the pytorch model
         joint_model.load_state_dict(torch.load(args['best_model_path']))
@@ -285,11 +289,22 @@ def run_experiment(args):
 
     if do_eval:
         with torch.inference_mode():
-            yhat, poe_dist, yhats, dists = joint_model(test_tensors)
+            yhat, poe_dist, yhats, dists = joint_model(*test_tensors)
 
         ypred = yhat.argmax(dim=1).numpy()
 
         ACC_TEST = (ypred == ytest_gt.numpy()).mean()
+
+        # get roc_score
+        if yhat.shape[1] > 2:
+            AUC_TEST = roc_auc_score(ytest_gt, yhat.numpy(), multi_class='ovr')
+        elif yhat.shape[1] == 2:
+            AUC_TEST = roc_auc_score(ytest_gt, yhat[:, 1].numpy())
+        else:
+            logging.warning("AUC not computed, only one class in the output...")
+            AUC_TEST = None
+
+        mlflow.log_metric("roc_auc", AUC_TEST)
 
         CONFUSION_TEST = confusion_matrix(ytest_gt, ypred)
 
@@ -314,7 +329,7 @@ def run_experiment(args):
     if args.get('igrads', False):
         all_data_tensors = [torch.tensor(d.values, dtype=torch.float32) for d in train_X_list]
         baselines = [-torch.rand_like(el)/2 for el in all_data_tensors]
-        baselines = [el[:, torch.randperm(el.shape[1])] for el in baselines]
+        # baselines = [el[:, torch.randperm(el.shape[1])] for el in baselines]
 
         all_igrad_scores = []
 
