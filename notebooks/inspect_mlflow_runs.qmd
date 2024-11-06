@@ -202,8 +202,16 @@ cutoff = pd.Timestamp("2024-10-7 12:30:45", tz="UTC")
 run_df_binary = run_df_binary[run_df_binary.start_time > cutoff]
 
 # roc_auc of mean and concat
-roc_auc_mean = run_df_binary[run_df_binary['params.combine_fn'] == "mean"]['metrics.test_accuracy_RF_igrads_Cal04_0.1']
-roc_auc_concat = run_df_binary[run_df_binary['params.combine_fn'] == "concat"]['metrics.test_accuracy_RF_igrads_Cal04_0.1']
+roc_auc_mean_igrad = run_df_binary[run_df_binary['params.combine_fn'] == "mean"]['metrics.test_auc_RF_igrads_Cal04_0.1']
+roc_auc_concat_igrad = run_df_binary[run_df_binary['params.combine_fn'] == "concat"]['metrics.test_auc_RF_igrads_Cal04_0.1']
+
+(roc_auc_mean_igrad.mean(), roc_auc_concat_igrad.mean())
+
+roc_auc_mean_shapley = run_df_binary[run_df_binary['params.combine_fn'] == "mean"]['metrics.test_auc_RF_shapley_Cal04_0.1']
+roc_auc_concat_shapley = run_df_binary[run_df_binary['params.combine_fn'] == "concat"]['metrics.test_auc_RF_shapley_Cal04_0.1']
+
+(roc_auc_mean_shapley.mean(), roc_auc_concat_shapley.mean())
+
 ```
 
 ```{python}
@@ -229,6 +237,22 @@ plt.xlabel("Combine Function")
 plt.ylabel("ROC AUC")
 
 fig.savefig("output/layer_size_experiments/images/roc_auc_multiclass.png")
+
+## multiclass with 0.1 features based on...
+
+# shapley values
+sub_shapley_mean = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "mean"]['metrics.test_auc_RF_shapley_691_0.1']
+sub_shapley_concat = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "concat"]['metrics.test_auc_RF_shapley_691_0.1']
+
+(sub_shapley_mean.mean(), sub_shapley_concat.mean())
+
+
+# integrated gradients
+sub_igrad_mean = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "mean"]['metrics.test_auc_RF_igrads_691_0.1']
+sub_igrad_concat = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "concat"]['metrics.test_auc_RF_igrads_691_0.1']
+
+(sub_igrad_mean.mean(), sub_igrad_concat.mean())
+
 ```
 
 ## Recompute Predicted Values for Models
@@ -413,4 +437,190 @@ for i, row in run_df_binary[run_df_binary.start_time < pd.Timestamp("2024-9-12 1
         # overwrite the file with a single 'concat' line:
         with open(combine_param, "w") as f:
             f.write("concat")
+```
+
+```{python}
+# noise experiments shap vs igrads on ICL102
+
+noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments")
+
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+run_df = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+# arrange by layer_sizes and n_noise
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+
+
+mlflow_client = mlflow.MlflowClient()
+mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
+
+"""
+Need to construct:
+- Igrads separated by static and dynamic architecture
+- Shapley separated by static and dynamic architecture
+"""
+
+# sort this stupid dataframe
+layer_x_noise = [eval(el) for el in run_df['params.layer_x_noise']]
+run_df['n_noise'] = [el['n_noise'] for el in layer_x_noise]
+run_df['layer_sizes'] = [str(el['layer_sizes']) for el in layer_x_noise]
+
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+# move the last 2 rows to the top
+run_df = pd.concat([run_df.iloc[-2:], run_df.iloc[:-2]])
+
+# igrad_random_static = []
+# igrad_random_dynamic = []
+
+# igrad_static = []
+# igrad_dynamic = []
+
+# shap_random_static = []
+# shap_random_dynamic = []
+
+# shap_static = []
+# shap_dynamic = []
+
+all_taus = []
+exploded_noise_levels = []
+exploded_method = []
+exploded_dvs = []
+
+# i = 2
+# row = run_df.iloc[i]
+
+for i, (j, row) in enumerate(run_df.iterrows()):
+    i = 0
+    row = run_df.iloc[i]
+    # print(i)
+    # print(row.layer_sizes)
+    layer_x_noise = row['params.layer_x_noise']
+    
+    # igrads
+    igrad_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_aug")
+    igrad_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_rand")
+
+    igrad_orig_v_aug = [el.value for el in igrad_orig_v_aug]
+    igrad_orig_v_rand = [el.value for el in igrad_orig_v_rand]
+
+
+    all_taus.extend(igrad_orig_v_aug)
+    exploded_noise_levels.extend([row.n_noise] * len(igrad_orig_v_aug))
+    all_taus.extend(igrad_orig_v_rand)
+    exploded_noise_levels.extend([0] * len(igrad_orig_v_rand))
+    exploded_method.extend(['igrad'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+    if i < 5:
+        exploded_dvs.extend(['dynamic'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+    else:
+        exploded_dvs.extend(['static'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+    
+    # shap
+    shap_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_aug")
+    shap_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_rand")
+
+    shap_orig_v_aug = [el.value for el in shap_orig_v_aug]
+    shap_orig_v_rand = [el.value for el in shap_orig_v_rand]
+
+    all_taus.extend(shap_orig_v_aug)
+    exploded_noise_levels.extend([row.n_noise] * len(shap_orig_v_aug))
+    all_taus.extend(shap_orig_v_rand)
+    exploded_noise_levels.extend([0] * len(shap_orig_v_rand))
+    exploded_method.extend(['shap'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+    if i < 5:
+        exploded_dvs.extend(['dynamic'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+    else:
+        exploded_dvs.extend(['static'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+plot_df = pd.DataFrame({
+    'tau': all_taus,
+    'n_noise': exploded_noise_levels,
+    'method': exploded_method,
+    'dv': exploded_dvs
+})
+
+####
+fig, axs = plt.subplots(1,2,figsize=(12,8))
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0])
+axs[0].set_xlabel("Number of Noise Features")
+axs[0].set_ylabel("Kendall's Tau")
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1])
+
+
+
+#### 
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = ax)
+ax.set_xlabel("N")
+
+
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+
+all_igrad_tau.insert(0, igrad_random_taus)
+all_shap_tau.insert(0, shap_random_taus)
+    
+# dynamic plot df
+taus = shap_random_dynamic + shap_dynamic + igrad_random_dynamic + igrad_dynamic
+methods = ['shapley']*(len(shap_dynamic) + len(shap_random_dynamic)) + ['igrads']*(len(igrad_dynamic) + len(igrad_random_dynamic))
+noise_levels_long = [nl for t, nl in zip(taus, n_noise_levels) for el in t]
+
+n_noise_levels = [0, 100, 500, 1000, 2500, 4000]
+
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = all_igrad_tau, ax = ax, color = 'skyblue')
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+# repeat n_noise for each run
+noise_levels_long = [nl for t, nl in zip(all_igrad_tau, n_noise_levels) for el in t]
+noise_levels_long = noise_levels_long * 2
+
+# flatten all_shap_tau
+all_shap_tau_flat = [el for sublist in all_shap_tau for el in sublist]
+all_igrad_tau_flat = [el for sublist in all_igrad_tau for el in sublist]
+
+# make grouped boxplot with two boxplots, one shapley and one igrad per noise level:
+plot_df = pd.DataFrame({
+    'tau': all_shap_tau_flat + all_igrad_tau_flat,
+    'n_noise': noise_levels_long,
+    'method': ['shapley']*len(all_shap_tau_flat) + ['igrads']*len(all_igrad_tau_flat)
+})
+
+
+
+fig, ax = plt.subplots()
+
+sns.boxplot(data = plot_df, x = 'n_noise', y = 'tau', hue = 'method', ax = ax)
+
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+
+
+
 ```
