@@ -334,7 +334,7 @@ def handler(event, context):
 
         # make all the plots and dump them to disk
         # TODO:  I am assuming binary classification, for multi-class we need to loop over the first index as well probably
-        for tmp_tensor, sv, fname in zip(all_data_tensors, shap_values[0], event['edata_filenames']):
+        for k, (tmp_tensor, sv, fname) in enumerate(zip(all_data_tensors, shap_values[0], event['edata_filenames'])):
             fig = plt.gcf()
             shap.summary_plot(sv, features=tmp_tensor, feature_names=datas[k].index, show=False)
             fig.savefig(os.path.join(event['output_dir'], 'shap_summary_plot_{}.png'.format(fname)))
