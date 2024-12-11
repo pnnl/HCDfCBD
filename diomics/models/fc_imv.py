@@ -115,7 +115,7 @@ class JointVAE(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: List[torch.Tensor]):
+    def forward(self, *x: List[torch.Tensor]):
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
 
         dists = []
@@ -172,7 +172,9 @@ class JointVAE(nn.Module):
         # compute the variational loss for each marginal model
         var_losses = [var_loss(y, yhat, dist, **kwargs) for yhat, dist in zip(yhats, dists)]
     
-        return product_loss + sum(var_losses)
+        loss = product_loss + sum(var_losses)
+
+        return product_loss, var_losses, loss
     
 def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None):
     """ Compute the variational loss for a single marginal model

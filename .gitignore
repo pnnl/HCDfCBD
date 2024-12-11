@@ -14,6 +14,7 @@ notebooks/*
 !notebooks/deep_imv_view_missing.qmd
 !notebooks/fake_edata_experiments.qmd
 !notebooks/inspect_mlflow_runs.qmd
+!notebooks/check_by_feature_variability.qmd
 
 # hydra/mlflow
 multirun

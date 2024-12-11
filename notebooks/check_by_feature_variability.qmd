@@ -1,0 +1,357 @@
+---
+title: Variable Importance
+jupyter: dataharm
+---
+
+```{python}
+import sys
+sys.path.append('../')
+```
+
+```{python}
+import torch
+
+from diomics.models.multi_mlp import simple_FC, JointMLP, make_joint_model
+from diomics.featimportance.igrads import integrated_grads
+from diomics.featimportance.comparison import overlap_sets
+from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df, facet_force_plots
+import shap
+from scipy.stats import weightedtau
+from sklearn.metrics import roc_auc_score, confusion_matrix
+from sklearn.linear_model import LinearRegression
+
+import numpy as np
+import pandas as pd
+import copy
+import pickle
+import datetime
+import re
+import itertools
+from tqdm.notebook import tqdm
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+
+import mlflow
+```
+
+# Inspect the noise layer experiments
+
+```{python}
+def get_run_artifacts(run_id):
+    artifact_uri = mlflow.get_run(run_id).info.artifact_uri
+    artifact_base_path = re.sub("^file://", "", artifact_uri)
+    all_artifacts = mlflow.artifacts.list_artifacts(run_id=run_id)
+    return artifact_base_path, all_artifacts
+```
+
+```{python}
+# noise experiments shap vs igrads on ICL102
+
+noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments")
+
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+
+# run that started with [64, 64], [128,128]
+run_df = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+run_df = run_df.sort_values(by = ['start_time'])
+run_df = run_df.iloc[:10,:]
+
+# run that started with [64, 64], [512, 512]
+run_df = run_df[run_df.start_time < pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+# run that started with [128, 128], [256, 256]
+run_df = run_df[(run_df['params.dataset_1'] == 'metab') & (run_df['params.dataset_2'] == 'lip')]
+run_df = run_df.iloc[10:20]
+
+# run with high dropout
+run_df = run_df[run_df['params.dropout'] == '0.5']
+
+# run with l1 regularization
+noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments-l1")
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+
+# VAE run, normal stuff
+
+# filter to non-null in params.z_dim
+run_df = run_df[run_df['params.z_dim'].notnull()].iloc[:10]
+
+
+##### Post-process the dataframe
+run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+# arrange by layer_sizes and n_noise
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+
+# mlflow_client = mlflow.MlflowClient()
+# mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
+
+"""
+Need to construct:
+- Igrads separated by static and dynamic architecture
+- Shapley separated by static and dynamic architecture
+"""
+
+# sort this stupid dataframe
+# layer_x_noise = [eval(el) for el in run_df['params.layer_x_noise']]
+# run_df['n_noise'] = [el['n_noise'] for el in layer_x_noise]
+# run_df['layer_sizes'] = [str(el['layer_sizes']) for el in layer_x_noise]
+
+# run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+```
+
+```{python}
+# get all the shapley values
+all_results = {}
+
+# for each experiment, we will get 10 shap values arrays
+# average across samples for each, and get their ranks
+# move to the next experiment (noise level), probably want to also assign keys based on noise level here ...
+# See for feature index j or whatever, what is the direction,variance,histogram of ranks for that feature.
+# Do the lipids/peptides exhibit specific behaviors?  e.g. all peptides tend to go down/up in rank.
+
+for rid in run_df.run_id:
+    artifacts_base_path, artifacts = get_run_artifacts(rid)
+    all_results[rid] = pickle.load(open(os.path.join(artifacts_base_path, artifacts[0].path), "rb"))
+```
+
+```{python}
+# go through the run_df run_ids since they we pre-arranged them
+all_sv_static = []
+
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]).mean(axis=0)
+        sv2 = np.abs(sv[0][1]).mean(axis = 0)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = tmp_sv + cat_sv if tmp_sv is not None else cat_sv
+
+    tmp_sv /= 10
+    all_sv_static.append(tmp_sv)
+
+Y_static = np.stack(all_sv_static)
+Y_static_ranks = np.argsort(np.argsort(Y_static, axis = 1), axis = 1)
+X = np.array([100, 500, 1000, 2500, 4000])[:,None]
+
+lr = LinearRegression()
+lr.fit(X, Y_static_ranks)
+
+coefs_static = lr.coef_
+
+#sns.scatterplot(x = range(2266), y= coefs_static[:,0])
+
+#####
+all_sv_dynamic = []
+
+for idx, row in run_df.iloc[5:,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]).mean(axis=0)
+        sv2 = np.abs(sv[0][1]).mean(axis = 0)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = tmp_sv + cat_sv if tmp_sv is not None else cat_sv
+
+    tmp_sv /= 10
+    all_sv_dynamic.append(tmp_sv)
+
+Y_dynamic = np.stack(all_sv_dynamic)
+Y_dynamic_ranks = np.argsort(np.argsort(Y_dynamic, axis = 1), axis = 1)
+
+lr = LinearRegression()
+lr.fit(X, Y_dynamic_ranks)
+
+coefs_dynamic = lr.coef_
+
+plot_df = pd.DataFrame(
+    {
+        "x": list(range(coefs_static.shape[0])) + list(range(coefs_dynamic.shape[0])),
+        "y": np.concatenate([coefs_static[:,0], coefs_dynamic[:,0]]),
+        "hue" : (["metabolites"] * n_feats + ["lipids"] * sv[0][1].shape[1])*2,
+        "layer_mode": ["static"] * coefs_static.shape[0] + ["dynamic"] * coefs_dynamic.shape[0]
+    
+    
+    }
+)
+
+fig, axs = plt.subplots(1,2, figsize = (12,8))
+
+sns.scatterplot(x = "x", y= "y", hue="hue", ax = axs[0], data = plot_df[plot_df.layer_mode == "static"])
+
+axs[0].legend().set_title('')
+axs[0].set_xlabel("")
+axs[0].set_ylabel("")
+
+sns.scatterplot(x = "x", y= "y", hue="hue", ax = axs[1], data = plot_df[plot_df.layer_mode == "dynamic"])
+
+axs[1].legend().remove()
+axs[1].set_xlabel("")
+axs[1].set_ylabel("")
+
+fig.supxlabel("Biomolecule")
+fig.supylabel("Regression Coefficient")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-rank-regression.png", dpi=300)
+```
+
+# Plot the distribution to see whats goin on....
+
+```{python}
+all_sv_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]).reshape(-1)
+        sv2 = np.abs(sv[0][1]).reshape(-1)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = np.concatenate([tmp_sv, cat_sv]) if tmp_sv is not None else cat_sv
+
+    all_sv_density.extend(tmp_sv)
+    noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+density_plot_df = pd.DataFrame(
+    {
+        "shap_val": all_sv_density,
+        "Noise Level": noise_vec
+    }
+)
+
+fig, ax = plt.subplots()
+
+# make a density plot
+sns.kdeplot(
+    x = "shap_val", 
+    hue = "Noise Level", 
+    data = density_plot_df[density_plot_df.shap_val < np.quantile(density_plot_df.shap_val, 0.9)], 
+    ax = ax
+)
+
+ax.set_xlabel("Shapley Value")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-shap-density.png", dpi=300)
+```
+
+```{python}
+all_ig_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[5:,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    # [dataset][target][run]
+    for sv in all_results[rid]['igrads_aug']:
+        n_feats = sv[0]["Cal04"][0].shape[1] - row.n_noise
+
+        sv1 = np.mean(sv[0]["Cal04"], axis = 0)
+        sv2 = np.mean(sv[1]["Cal04"], axis = 0)
+
+        sv1 = np.abs(sv1[:,:n_feats]).reshape(-1)
+        sv2 = np.abs(sv2).reshape(-1)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = np.concatenate([tmp_sv, cat_sv]) if tmp_sv is not None else cat_sv
+
+    all_ig_density.extend(tmp_sv)
+    noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+density_plot_df = pd.DataFrame(
+    {
+        "ig_val": all_ig_density,
+        "Noise Level": noise_vec
+    }
+)
+
+fig, ax = plt.subplots()
+
+# make a density plot
+sns.kdeplot(
+    x = "ig_val", 
+    hue = "Noise Level", 
+    data = density_plot_df[density_plot_df.ig_val < np.quantile(density_plot_df.ig_val, 0.9)], 
+    ax = ax
+)
+
+ax.set_xlabel("IGrad Value")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-igrad-density.png", dpi=300)
+```
+
+```{python}
+# for each feature, what is the variance of it's rank vs it's average rank -> scatterplot
+all_sv_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = []
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]) # N x p1
+        sv2 = np.abs(sv[0][1]) # N x p2
+
+        tmp_sv.append(sv1)
+
+    tmp_sv = np.stack(tmp_sv)
+    all_sv_density.append(tmp_sv)
+
+all_sv_density = np.concatenate(all_sv_density, axis = 0)
+
+all_sv_mean = np.concatenate(all_sv_density, axis = 0).mean(axis = 0)
+all_sv_std = np.concatenate(all_sv_density, axis = 0).std(axis = 0)
+
+sns.scatterplot(x = all_sv_mean, y = all_sv_std)
+
+# how do the actual -ranks- vary?
+# compute the average of the ranks
+all_sv_ranks = np.argsort(np.argsort(all_sv_density, axis = 2), axis = 2)
+
+sns.scatterplot(x = all_sv_mean, y = all_sv_ranks.std(axis = 0).mean(axis = 1))
+
+# all_sv_density.extend(tmp_sv)
+# noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+# density_plot_df = pd.DataFrame(
+#     {
+#         "shap_val": all_sv_density,
+#         "Noise Level": noise_vec
+#     }
+# )
+```

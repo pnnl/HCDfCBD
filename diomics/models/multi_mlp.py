@@ -48,6 +48,7 @@ class simple_FC(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         h = self.activation_fn(self.fc1(x))
+        h = self.dropout(h)
 
         for sz in range(1, len(self.hidden_sizes)):
             h = self.dropout(self.activation_fn(getattr(self, f'fc{sz+1}')(h)))

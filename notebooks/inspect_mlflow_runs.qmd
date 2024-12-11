@@ -445,7 +445,19 @@ for i, row in run_df_binary[run_df_binary.start_time < pd.Timestamp("2024-9-12 1
 noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments")
 
 run_df = mlflow.search_runs([noise_exp.experiment_id])
+
+# run that started with [64, 64], [128,128]
 run_df = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+# run that started with [64, 64], [512, 512]
+run_df = run_df[run_df.start_time < pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+# run that started with [128, 128], [256, 256]
+run_df = run_df[(run_df['params.dataset_1'] == 'metab') & (run_df['params.dataset_2'] == 'lip')]
+run_df = run_df.iloc[:10]
+
+# run with high dropout
+run_df = run_df[run_df['params.dropout'] == '0.5']
 
 run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
 run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
@@ -455,7 +467,7 @@ run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
 
 
 mlflow_client = mlflow.MlflowClient()
-mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
+# mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
 
 """
 Need to construct:
@@ -493,30 +505,30 @@ exploded_dvs = []
 # row = run_df.iloc[i]
 
 for i, (j, row) in enumerate(run_df.iterrows()):
-    i = 0
-    row = run_df.iloc[i]
+    # i = 0
+    # row = run_df.iloc[i]
     # print(i)
     # print(row.layer_sizes)
     layer_x_noise = row['params.layer_x_noise']
     
     # igrads
-    igrad_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_aug")
-    igrad_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_rand")
+    # igrad_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_aug")
+    # igrad_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_rand")
 
-    igrad_orig_v_aug = [el.value for el in igrad_orig_v_aug]
-    igrad_orig_v_rand = [el.value for el in igrad_orig_v_rand]
+    # igrad_orig_v_aug = [el.value for el in igrad_orig_v_aug]
+    # igrad_orig_v_rand = [el.value for el in igrad_orig_v_rand]
 
 
-    all_taus.extend(igrad_orig_v_aug)
-    exploded_noise_levels.extend([row.n_noise] * len(igrad_orig_v_aug))
-    all_taus.extend(igrad_orig_v_rand)
-    exploded_noise_levels.extend([0] * len(igrad_orig_v_rand))
-    exploded_method.extend(['igrad'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+    # all_taus.extend(igrad_orig_v_aug)
+    # exploded_noise_levels.extend([row.n_noise] * len(igrad_orig_v_aug))
+    # all_taus.extend(igrad_orig_v_rand)
+    # exploded_noise_levels.extend([0] * len(igrad_orig_v_rand))
+    # exploded_method.extend(['igrad'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
 
-    if i < 5:
-        exploded_dvs.extend(['dynamic'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
-    else:
-        exploded_dvs.extend(['static'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+    # if i < 5:
+    #     exploded_dvs.extend(['static'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+    # else:
+    #     exploded_dvs.extend(['dynamic'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
 
     
     # shap
@@ -533,9 +545,9 @@ for i, (j, row) in enumerate(run_df.iterrows()):
     exploded_method.extend(['shap'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
 
     if i < 5:
-        exploded_dvs.extend(['dynamic'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
-    else:
         exploded_dvs.extend(['static'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+    else:
+        exploded_dvs.extend(['dynamic'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
 
 plot_df = pd.DataFrame({
     'tau': all_taus,
@@ -545,17 +557,22 @@ plot_df = pd.DataFrame({
 })
 
 ####
-fig, axs = plt.subplots(1,2,figsize=(12,8))
+fig, axs = plt.subplots(1,2,figsize=(12,8), sharey=True)
 
 # sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
-sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0])
-axs[0].set_xlabel("Number of Noise Features")
-axs[0].set_ylabel("Kendall's Tau")
-
-# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0], legend=False)
 sns.boxplot(data = plot_df[plot_df['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1])
 
+axs[0].set_xlabel(None)
+axs[0].set_ylabel(None)
+axs[1].set_xlabel(None)
 
+# set common xlabel
+fig.supxlabel("Number of Noise Features")
+fig.supylabel("Kendall's Tau")
+fig.tight_layout()
+
+fig.savefig("output/layer_size_experiments/images/tau_noise_igrads_v_shap_large.png")
 
 #### 
 fig, ax = plt.subplots()

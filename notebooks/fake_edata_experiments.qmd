@@ -16,7 +16,7 @@ from torch.optim import AdamW
 
 from diomics.models.multi_mlp import simple_FC, JointMLP
 from diomics.featimportance.shapley import JointMLPWrapper
-from diomics.featimportance.igrads import integrated_grads
+from diomics.featimportance.igrads import integrated_grads, average_igrads
 from diomics.featimportance.comparison import overlap_sets
 from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df, facet_force_plots
 import shap
@@ -301,6 +301,7 @@ def compare_shap_scores(
         views_orig = [tensor_1, tensor_2]
         views_aug = [tensor_3, tensor_2]
         
+        cat_names = y.astype('category').cat.categories
         y_gt = y.astype('category').cat.codes
         y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
 
@@ -331,6 +332,11 @@ def compare_shap_scores(
             joint_model_orig_rand_wrp = JointMLPWrapper(joint_model_orig_rand)
             explainer = shap.DeepExplainer(joint_model_orig_rand_wrp, views_orig)
             shap_values_orig_rand = explainer.shap_values(views_orig, check_additivity=False)
+
+            ### Integrated Gradients
+            igrads_orig = average_igrads(views_orig, joint_model_orig, cat_names, n_steps = 50, n_runs = 10)
+            igrads_aug = average_igrads(views_aug, joint_model_aug, cat_names, n_steps = 50, n_runs = 10)
+            igrads_orig_rand = average_igrads(views_orig, joint_model_orig_rand, cat_names, n_steps = 50, n_runs = 10)
 
             scores_1_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
             scores_2_1 = np.abs(shap_values_aug[0][0]).mean(axis=0)
@@ -400,8 +406,10 @@ def collect_results(comparisons):
         tau_scores[k]['tau_1_2'] = [el[1] for el in comp['results_1_2']]
         tau_scores[k]['tau_1_3'] = [el[1] for el in comp['results_1_3']]
 
+        sv_orig_N, sv_orig_p = comp['shap_values_orig'][0][0][0].shape
+
         shap_mags[k]['shap_mag_orig'] = [np.abs(el[0][0]).mean(axis=0) for el in comp['shap_values_orig']]
-        shap_mags[k]['shap_mag_aug'] = [np.abs(el[0][0][:, :train_metab.shape[1]]).mean(axis=0) for el in comp['shap_values_aug']]
+        shap_mags[k]['shap_mag_aug'] = [np.abs(el[0][0][:, :sv_orig_p]).mean(axis=0) for el in comp['shap_values_aug']]
         shap_mags[k]['shap_mag_orig_2'] = [np.abs(el[0][1]).mean(axis=0) for el in comp['shap_values_orig']]
 
     return tau_scores, shap_mags
@@ -1072,6 +1080,65 @@ for nl in n_noise:
 n_noise = n_noise * 2
 ```
 
+
+## METAB VS LIPID
+```{python}
+# define noise levels and subsequently layer sizes based on a multiplier
+orig_sizes = [[128, 128], [256, 256]]
+
+# the original ratio between input sizes is....
+p1_size = train_metab.shape[1]
+p2_size = train_lip.shape[1]
+orig_ratio = train_metab.shape[1]/train_lip.shape[1]
+
+n_noise = [100, 500, 1000, 2500, 4000]
+layer_sizes = [orig_sizes] * 5
+
+mults = []
+
+for nl in n_noise:
+    # compute the new input size
+    mult = (1 + nl/p1_size)**0.5
+
+    mults.append(mult)
+
+    new_sizes = orig_sizes.copy()
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1], train_lip.shape[1]], 
+        hidden_sizes = orig_sizes,
+        combine_fn = "concat"
+    )
+
+    # get number of parameters in jmodel:
+    # n_params_0 = sum(p.numel() for p in jmodel.margin_models[0].parameters())
+    # n_params_1 = sum(p.numel() for p in jmodel.margin_models[1].parameters())
+
+    n_params_0 = orig_sizes[0][0]**2
+    n_params_1 = orig_sizes[1][0]**2
+
+    # a = 1, b = (1 + d_in), c = mult * n_params, solve for x with quadratic formula:
+    # x = (-b + sqrt(b^2 - 4ac))/2a
+    x_0 = (-1 + np.sqrt(1 + 4 * mult * n_params_0))/2
+
+    # now with c = n_params/mult
+    x_1 = (-1 + np.sqrt(1 + 4 * n_params_1/mult))/2
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1] + nl, train_lip.shape[1]], 
+        hidden_sizes = [[int(x_0)]*2, [int(x_1)]*2],
+        combine_fn = "concat"
+    )
+
+    new_sizes[0] = [int(x_0)]*2
+    new_sizes[1] = [int(x_1)]*2
+
+    layer_sizes.append(new_sizes)
+
+n_noise = n_noise * 2
+```
+
+## METAB VS PROTEIN
 ```{python}
 # define noise levels and subsequently layer sizes based on a multiplier
 orig_sizes = [[64, 64], [512, 512]]
@@ -1101,8 +1168,11 @@ for nl in n_noise:
     )
 
     # get number of parameters in jmodel:
-    n_params_0 = sum(p.numel() for p in jmodel.margin_models[0].parameters())
-    n_params_1 = sum(p.numel() for p in jmodel.margin_models[1].parameters())
+    # n_params_0 = sum(p.numel() for p in jmodel.margin_models[0].parameters())
+    # n_params_1 = sum(p.numel() for p in jmodel.margin_models[1].parameters())
+
+    n_params_0 = 64**2
+    n_params_1 = 512**2
 
     # a = 1, b = (1 + d_in), c = mult * n_params, solve for x with quadratic formula:
     # x = (-b + sqrt(b^2 - 4ac))/2a
@@ -1145,7 +1215,7 @@ pickle.dump(results_squeeze, open(f"/Users/clab683/git_repos/DeepIMV/output/laye
 
 ```{python}
 # plot the data, optionally load previous results
-# results_squeeze = pickle.load(open('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_2024-10-15.pkl', 'rb'))
+results_squeeze = pickle.load(open('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_2024-10-15.pkl', 'rb'))
 
 tau_squeeze, shap_squeeze = collect_results(results_squeeze)
 

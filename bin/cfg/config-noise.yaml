@@ -1,0 +1,13 @@
+layer_x_noise:
+  n_noise: 100
+  layer_sizes: [[64, 64], [512, 512]]
+z_dim: null
+n_evals_per_noise: 10
+n_iters: 1250
+combine_fn: 'concat'
+experiment_name: noise-layer-experiments
+dataset_1:  'metab'
+dataset_2:  'lip'
+l1_penalty: null
+dropout: 0.2
+prog: false
