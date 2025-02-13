@@ -25,7 +25,51 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def load_data():
+def load_icl102_multiclass():
+    train_lip = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/lip_neg_train.csv")
+    test_lip = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/lip_neg_test.csv")
+
+    train_metab = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/metab_train.csv")
+    test_metab = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/metab_test.csv")
+
+    train_pro = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/pro_train.csv")
+    test_pro = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/pro_test.csv")
+
+    ytrain = train_lip['y']
+    ytest = test_lip['y']
+
+    train_lip = train_lip.set_index("SampleID").drop("y", axis=1)
+    test_lip = test_lip.set_index("SampleID").drop("y", axis=1)
+
+    train_metab = train_metab.set_index("SampleID").drop("y", axis=1)
+    test_metab = test_metab.set_index("SampleID").drop("y", axis=1)
+
+    train_pro = train_pro.set_index("SampleID").drop("y", axis=1)
+    test_pro = test_pro.set_index("SampleID").drop("y", axis=1)
+
+    test_lip = test_lip - test_lip.median().median()
+    train_lip = train_lip - train_lip.median().median()
+
+    test_metab = test_metab - test_metab.median().median()
+    train_metab = train_metab - train_metab.median().median()
+
+    test_pro = test_pro - test_pro.median().median()
+    train_pro = train_pro - train_pro.median().median()
+
+    out_dict = {
+        'train_metab': train_metab,
+        'train_pro': train_pro,
+        'train_lip': train_lip,
+        'test_metab': test_metab,
+        'test_pro': test_pro,
+        'test_lip': test_lip,
+        'ytrain': ytrain,
+        'ytest': ytest
+    }
+
+    return out_dict
+
+def load_icl104_binary():
     # proData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_edata_mlready.csv')
     # lipData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_edata_mlready.csv')
     # metabData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_edata_mlready.csv')
@@ -124,27 +168,45 @@ def evaluate_overlap(shaps_1, shaps_2, n_features = 10):
 
     return overlaps, tau
 
-def make_joint_model(input_size, prediction_dim, hidden_sizes=[[128, 64, 64]]*2, dropout=0.2, **kwargs):
-    marg_1 = simple_FC(input_size=input_size[0], hidden_sizes=hidden_sizes[0], prediction_dim=prediction_dim, dropout=dropout)
-    marg_2 = simple_FC(input_size=input_size[1], hidden_sizes=hidden_sizes[1], prediction_dim=prediction_dim, dropout=dropout)
+def make_joint_model(input_sizes, prediction_dim, hidden_sizes=[[128, 64, 64]]*2, dropout=0.2, **kwargs):
+    assert len(input_sizes) == len(hidden_sizes), "Number of input sizes not equal to number of hidden sizes"
+    
+    marginals = [
+        simple_FC(
+            input_size = sz,
+            hidden_sizes = hs,
+            prediction_dim = prediction_dim,
+            dropout = dropout
+        )
+        for sz, hs in zip(input_sizes, hidden_sizes)
+    ]
 
-    joint_model = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout, **kwargs)
+    joint_model = JointMLP(marginal_models=marginals, hidden_dim=64, dropout=dropout, **kwargs)
     optimizer = AdamW(joint_model.parameters(), lr = 1e-4)
 
     return joint_model, optimizer
 
-def make_deepimv(input_size, z_dim, prediction_dim, hidden_sizes=[[128, 64, 64]]*2, dropout=0.2, **kwargs):
-    marg_1 = FC_Marginal(input_size[0], hidden_sizes[0], z_dim, prediction_dim, dropout)
-    marg_2 = FC_Marginal(input_size[1], hidden_sizes[1], z_dim, prediction_dim, dropout)
+def make_deepimv(input_sizes, z_dim, prediction_dim, hidden_sizes=[[128, 64, 64]]*2, dropout=0.2, **kwargs):
+    assert len(input_sizes) == len(hidden_sizes), "Number of input sizes not equal to number of hidden sizes"
 
-    joint_model = JointVAE([marg_1, marg_2], hidden_dim = 64, dropout = dropout)
+    marginals = [
+        FC_Marginal(
+            sz,
+            hs,
+            z_dim,
+            prediction_dim = prediction_dim,
+            dropout = dropout
+        )
+        for sz, hs in zip(input_sizes, hidden_sizes)
+    ]
+
+    joint_model = JointVAE(marginals, hidden_dim = 64, dropout = dropout)
     optimizer = AdamW(joint_model.parameters(), lr = 1e-4)
 
     return joint_model, optimizer
 
 def compare_shap_scores(
-    data_1, 
-    data_2, 
+    *datas,
     y, 
     test_x,
     test_y,
@@ -160,39 +222,36 @@ def compare_shap_scores(
     
     logger.info(f"Starting run with n_noise = {n_noise}, hidden_sizes = {str(hidden_sizes)}")
 
-    # Add noise features to each dataset
-    stds_1 = data_1.std().sample(n_noise, replace = True)
-    stds_2 = data_2.std().sample(n_noise, replace = True)
+    # the first dataset should be the one receiving the augmentation
+    mean_1 = datas[0].mean().sample(n_noise, replace = True)
+    std_1 = datas[0].std().sample(n_noise, replace = True)
 
-    means_1 = data_1.mean().sample(n_noise, replace = True)
-    means_2 = data_2.mean().sample(n_noise, replace = True)
+    data_1_noise = np.random.normal(mean_1, std_1, (datas[0].shape[0], n_noise))
 
-    data_1_noise = np.random.normal(means_1, stds_1, (data_1.shape[0], n_noise))
-    data_2_noise = np.random.normal(means_2, stds_2, (data_2.shape[0], n_noise))
-
-    data_1_noise_test = np.random.normal(means_1, stds_1, (test_x[0].shape[0], n_noise))
+    data_1_noise_test = np.random.normal(mean_1, std_1, (test_x[0].shape[0], n_noise))
 
     test_x_aug = [
         pd.concat([test_x[0], pd.DataFrame(data_1_noise_test, index = test_x[0].index)], axis = 1),
-        test_x[1]
+        *test_x[1:]
     ]
 
-    test_tensors = [torch.tensor(test_x[0].values, dtype = torch.float32), torch.tensor(test_x[1].values, dtype = torch.float)]
-    test_tensors_aug = [torch.tensor(test_x_aug[0].values, dtype = torch.float32), torch.tensor(test_x_aug[1].values, dtype = torch.float32)]
+    test_tensors = [torch.tensor(t.values, dtype = torch.float32) for t in test_x]
+    test_tensors_aug = [torch.tensor(t.values, dtype = torch.float32) for t in test_x_aug]
 
-    data_1_copy = data_1.copy()
+    data_1_copy = datas[0].copy()
     # data_2_copy = data_2.copy()
 
     # attach the noise to the copies
     data_1_copy = pd.concat([data_1_copy, pd.DataFrame(data_1_noise, index = data_1_copy.index)], axis = 1)
     # data_2_copy = pd.concat([data_2_copy, pd.DataFrame(data_2_noise, index = data_2_copy.index)], axis = 1)
 
-    tensor_1 = torch.tensor(data_1.values, dtype = torch.float32)
-    tensor_2 = torch.tensor(data_2.values, dtype = torch.float32)
-    tensor_3 = torch.tensor(data_1_copy.values, dtype = torch.float32)
+    tensor_1 = torch.tensor(datas[0].values, dtype = torch.float32)
+    tensor_1_aug = torch.tensor(data_1_copy.values, dtype = torch.float32)
 
-    views_orig = [tensor_1, tensor_2]
-    views_aug = [tensor_3, tensor_2]
+    tensors_rest = [torch.tensor(d.values, dtype = torch.float32) for d in datas[1:]]
+
+    views_orig = [tensor_1, *tensors_rest]
+    views_aug = [tensor_1_aug, *tensors_rest]
     
     cat_names = y.astype('category').cat.categories
     y_gt = y.astype('category').cat.codes
@@ -201,17 +260,15 @@ def compare_shap_scores(
 
     by_model_results = {}
 
-    # import pdb;pdb.set_trace()
-
     for _ in range(n_evals_per_noise):
         if z_dim is not None:
-            joint_model_orig, optimizer_orig = make_deepimv([views_orig[0].shape[1], views_orig[1].shape[1]], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
-            joint_model_aug, optimizer_aug = make_deepimv([views_aug[0].shape[1], views_aug[1].shape[1]], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
-            joint_model_orig_rand, optimizer_orig_rand = make_deepimv([views_orig[0].shape[1], views_orig[1].shape[1]], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_orig, optimizer_orig = make_deepimv([v.shape[1] for v in views_orig], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_aug, optimizer_aug = make_deepimv([v.shape[1] for v in views_aug], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_orig_rand, optimizer_orig_rand = make_deepimv([v.shape[1] for v in views_orig], z_dim, n_cats, hidden_sizes, dropout, **kwargs)
         else:
-            joint_model_orig, optimizer_orig = make_joint_model([views_orig[0].shape[1], views_orig[1].shape[1]], n_cats, hidden_sizes, dropout, **kwargs)
-            joint_model_aug, optimizer_aug = make_joint_model([views_aug[0].shape[1], views_aug[1].shape[1]], n_cats, hidden_sizes, dropout, **kwargs)
-            joint_model_orig_rand, optimizer_orig_rand = make_joint_model([views_orig[0].shape[1], views_orig[1].shape[1]], n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_orig, optimizer_orig = make_joint_model([v.shape[1] for v in views_orig], n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_aug, optimizer_aug = make_joint_model([v.shape[1] for v in views_aug], n_cats, hidden_sizes, dropout, **kwargs)
+            joint_model_orig_rand, optimizer_orig_rand = make_joint_model([v.shape[1] for v in views_orig], n_cats, hidden_sizes, dropout, **kwargs)
 
         joint_model_orig, train_acc, test_acc = train(joint_model_orig, optimizer_orig, views_orig, y_gt, n_iters = n_iters, alpha = None, gamma = 3, l1_penalty=l1_penalty, prog=prog)
         joint_model_aug, train_acc, test_acc = train(joint_model_aug, optimizer_aug, views_aug, y_gt, n_iters = n_iters, alpha = None, gamma = 3, l1_penalty=l1_penalty, prog=prog)
@@ -243,21 +300,33 @@ def compare_shap_scores(
             igrads_orig_rand = average_igrads(views_orig, joint_model_orig_rand, cat_names, n_steps = 50, n_runs = 10)
 
         # Compile results:
-        # The format ob objects is *_(orig/noise/random)_(dataset 1 or 2)
+        # The format of objects is *_(orig/noise/random)_(dataset 1 or 2)
+        # format for shap output with shap==0.4.3
 
         # get overlap of shap values
         scores_orig_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
         scores_aug_1 = np.abs(shap_values_aug[0][0]).mean(axis=0)
 
         # remove the noise features
-        scores_aug_1_trunc = scores_aug_1[:data_1.shape[1]]
-
+        scores_aug_1_trunc = scores_aug_1[:datas[0].shape[1]]
         scores_rand_1 = np.abs(shap_values_orig_rand[0][0]).mean(axis=0)
 
         # scores for the second dataset
-        scores_orig_2 = np.abs(shap_values_orig[0][1]).mean(axis=0)
-        scores_aug_2 = np.abs(shap_values_aug[0][1]).mean(axis=0)
-        scores_rand_2 = np.abs(shap_values_orig_rand[0][1]).mean(axis=0)
+        # we need to combine these across all datasets, this involves concatenating the features after averaging
+        scores_orig_2 = np.concatenate([
+            np.abs(sv).mean(axis=0)
+            for sv in shap_values_orig[0][1:]
+        ])
+
+        scores_aug_2 = np.concatenate([
+            np.abs(sv).mean(axis=0)
+            for sv in shap_values_aug[0][1:]
+        ])
+
+        scores_rand_2 = np.concatenate([
+            np.abs(sv).mean(axis=0)
+            for sv in shap_values_orig_rand[0][1:]
+        ])
 
         scores_orig_all = np.concatenate([scores_orig_1, scores_orig_2])
         scores_aug_all = np.concatenate([scores_aug_1_trunc, scores_aug_2])
@@ -280,7 +349,7 @@ def compare_shap_scores(
             # get overlap of igrads
             igrads_orig_1 = np.mean(np.abs(igrads_orig[0][cat_names[0]]), axis=0)
             igrads_aug_1 = np.mean(np.abs(igrads_aug[0][cat_names[0]]), axis=0)
-            igrads_aug_1_trunc = igrads_aug_1[:,:data_1.shape[1]]
+            igrads_aug_1_trunc = igrads_aug_1[:,:datas[0].shape[1]]
             igrads_rand_1 = np.mean(np.abs(igrads_orig_rand[0][cat_names[0]]), axis=0)
 
             igrads_orig_2 = np.mean(np.abs(igrads_orig[1][cat_names[0]]), axis=0)
@@ -364,13 +433,16 @@ def main(cfg: DictConfig) -> None:
         mlflow.log_params(OmegaConf.to_container(cfg))
 
         # train/test, metab/pro/lip, ytrain, ytest
-        datadict = load_data()
+        datadict = load_icl104_binary()
 
-        test_x = [datadict['test_' + cfg.dataset_1], datadict['test_' + cfg.dataset_2]]
+        train_x = [datadict['train_' + dset] for dset in cfg.datasets]
+        
+        test_x = [datadict['test_' + dset] for dset in cfg.datasets]
         test_y = datadict['ytest']
 
         results = compare_shap_scores(
-            datadict['train_' + cfg.dataset_1], datadict['train_' + cfg.dataset_2], datadict['ytrain'], 
+            *train_x, 
+            y = datadict['ytrain'], 
             n_noise=cfg.layer_x_noise.n_noise, 
             hidden_sizes=cfg.layer_x_noise.layer_sizes,
             z_dim=cfg.z_dim,

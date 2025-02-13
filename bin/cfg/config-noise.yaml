@@ -6,8 +6,7 @@ n_evals_per_noise: 10
 n_iters: 1250
 combine_fn: 'concat'
 experiment_name: noise-layer-experiments
-dataset_1:  'metab'
-dataset_2:  'lip'
+datasets: ['metab', 'lip']
 l1_penalty: null
 dropout: 0.2
 prog: false
