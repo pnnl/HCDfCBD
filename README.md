@@ -1,23 +1,31 @@
 # Importance Metrics for Omics with Deep Learning
-A package with various methods for identifying important variables in multi-omics with deep learning.
+
+This repo contains:
+- Scripts and notebooks to run various experiments regarding SHAP values in multi-view, multi-omics deep learning models.
+- A package with model definitions for two multi-view multi-omics models as well as helpers for investigations into importance metrics.
 
 Includes a pytorch rewrite of:  Lee, C. & van der Schaar, M. A Variational Information Bottleneck Approach to Multi-Omics Data Integration. Preprint at https://doi.org/10.48550/arXiv.2102.03014 (2021).  Original code at https://github.com/chl8856/DeepIMV.  Other models include a non-variational model that averages the latent representations of the different views, and a simple MLP that concatenates the views.
 
-### Requirements
+## Requirements
 The python packages in requirements.txt should be all you need (plus Jupyter for notebooks).  Install in a virtual environment/conda environment with:
 
 ```
 pip install -r requirements.txt
 ```
 
-### Variable importance
+The notebooks are in quarto (.qmd) format.  Install quarto from their website https://quarto.org/docs/get-started/.  VSCode has a quarto plugin that allows you to run code chunks from a .qmd document in an interactive window.  Quarto can also convert .qmd to .ipynb from the command line with e.g. `quarto convert myfile.qmd`.
 
-We take a look at SHAPley values using the shap package, as well as integrated gradients using our own implementation.  These are compared with each other and the results of a simple ANOVA model.
+## Ablation Experiments
+We perform experiments to assess the effect of layer size and random noise on SHAP values.  See [the README for the scripts used to run these](bin/README.md).
 
-### Data
+## Variable importance
+
+We take a look at SHAPley values using the `shap` package, as well as integrated gradients using our own implementation.  These are compared with each other and the results of a simple ANOVA model.
+
+## Data
 Most development was done using the ICL-104 dataset.  Please email if you need access to this dataset.  Any other multi-view omics dataset should work, though modifications will need to be made to the path and probably certain details of the model (e.g. if you have only 2 views instead of 3).
 
-### Code
+## Code
 For some examples of how to use the code, see the first couple sections of `notebooks/deep_imv_examples.ipynb` for the DeepIMV rewrite.  Other notebooks include examples on how to train a model and perform variable importance, 
 
 To try to recreate the tcga results from the deepIMV paper:
@@ -28,7 +36,7 @@ To try to recreate the tcga results from the deepIMV paper:
 **Multi-view MLP**
 The multi-view MLP implementation is in `models/multi_mlp.py`.  It is very similar to the DeepIMV architecture, but does not use any variational inference.  Instead it simply computes an average of the latent representations of the different views, and then uses that as input to the the final MLP.  An example of running this model is in `notebooks/multiview_mlp_example.ipynb`.
 
-# Running the pipeline from a script
+## Performing Training/Getting Importance Scores From a Script
 
 A script to run the pipeline from model training to variable importance is at `lambda/lambda_function.py`.  This can be run from the command line with the requirements installed and `diomics` installed or on your `PYTHONPATH` environment variable.  
 
