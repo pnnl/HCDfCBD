@@ -57,7 +57,7 @@ loss.backward()
 ## Example with real data
 
 ```{python}
-proData = pd.read_csv('~/Documents/Data/example_omicsdata/multi-omics-from-share/ICL104_Pep_Prot_Lipid_Metab/ICL104_proteins_luke.csv')
+proData = pd.read_csv('data/ICL104-binary/lip_edata')
 lipData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/ICL104_lipids_aligned_for_stats.xlsx")
 metabData = pd.read_excel("/Volumes/Data_Harmony/DHS_Omics/ICL04/OMICS_ICL104_Metabolomics_YMK.xlsx")
 metabData = metabData.drop(columns=['KEGG', 'CAS', 'PubChem'])
@@ -122,6 +122,19 @@ proData = proData[pro_inds]
 lipData = lipData.apply(lambda row: row.fillna(row.mean()), axis=1)
 metabData = metabData.apply(lambda row: row.fillna(row.mean()), axis=1)
 proData = proData.apply(lambda row: row.fillna(row.mean()), axis=1)
+
+lipData = pd.read_csv("data/ICL104-binary/lip_edata_mlready.csv")
+metabData = pd.read_csv("data/ICL104-binary/metab_edata_mlready.csv")
+proData = pd.read_csv("data/ICL104-binary/pro_edata_mlready.csv")
+
+lipData = lipData.set_index('Lipid')
+metabData = metabData.set_index('Metabolite')
+proData = proData.set_index('Protein')
+
+lipData = lipData.apply(lambda row: row.fillna(row.mean()), axis=1)
+metabData = metabData.apply(lambda row: row.fillna(row.mean()), axis=1)
+proData = proData.apply(lambda row: row.fillna(row.mean()), axis=1)
+
 ```
 
 ```{python}
@@ -176,18 +189,18 @@ I'll first compare the 'mean mlp' with the variational autoencoder variant from 
 
 ```{python}
 # three view-specific encoders with the appropriate input size:
-lip_marg = FC_Marginal(input_size=train_lip.shape[0], hidden_sizes=[128, 128], z_dim=10, prediction_dim=y.nunique())
-metab_marg = FC_Marginal(input_size=train_metab.shape[0], hidden_sizes=[64, 64], z_dim=10, prediction_dim=y.nunique())
-pro_marg = FC_Marginal(input_size=train_pro.shape[0], hidden_sizes=[256, 128], z_dim=10, prediction_dim=y.nunique())
+lip_marg = FC_Marginal(input_size=train_lip.shape[0], hidden_sizes=[128, 128], z_dim=10, prediction_dim=y.nunique(), dropout = 0.3)
+metab_marg = FC_Marginal(input_size=train_metab.shape[0], hidden_sizes=[64, 64], z_dim=10, prediction_dim=y.nunique(), dropout = 0.3)
+pro_marg = FC_Marginal(input_size=train_pro.shape[0], hidden_sizes=[256, 128], z_dim=10, prediction_dim=y.nunique(), dropout = 0.3)
 
 # joint model
 joint_vae = JointVAE(marginal_models=[lip_marg, metab_marg, pro_marg], hidden_dim=128)
 
 last_hidden_size = 64
 
-lip_marg_mlp = simple_FC(input_size=train_lip.shape[0], hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique())
-metab_marg_mlp = simple_FC(input_size=train_metab.shape[0], hidden_sizes=[64, last_hidden_size], prediction_dim=y.nunique())
-pro_marg_mlp = simple_FC(input_size=train_pro.shape[0], hidden_sizes=[256, last_hidden_size], prediction_dim=y.nunique())
+lip_marg_mlp = simple_FC(input_size=train_lip.shape[0], hidden_sizes=[128, last_hidden_size], prediction_dim=y.nunique(), dropout = 0.5)
+metab_marg_mlp = simple_FC(input_size=train_metab.shape[0], hidden_sizes=[64, last_hidden_size], prediction_dim=y.nunique(), dropout = 0.5)
+pro_marg_mlp = simple_FC(input_size=train_pro.shape[0], hidden_sizes=[256, last_hidden_size], prediction_dim=y.nunique(), dropout = 0.5)
 
 # joint model
 joint_mlp = JointMLP(marginal_models=[lip_marg_mlp, metab_marg_mlp, pro_marg_mlp], hidden_dim=128, hooks=False)
@@ -210,9 +223,9 @@ metab_tensor = torch.tensor(train_metab.T.values, dtype=torch.float32)
 y_gt = ytrain.astype('category').cat.codes
 y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
 
-train_acc_vae = []
+# train_acc_vae = []
 train_acc_mlp = []
-test_acc_vae = []
+# test_acc_vae = []
 test_acc_mlp = []
 
 ytest_gt = ytest.astype('category').cat.codes
@@ -221,28 +234,28 @@ liptest_tensor = torch.tensor(test_lip.T.values, dtype=torch.float32)
 protest_tensor = torch.tensor(test_pro.T.values, dtype=torch.float32)
 metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
 
-for i in range(3500):
+for i in range(1500):
     views = [lip_tensor, metab_tensor, pro_tensor]
     
     # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
-    yhat, poe_dist, yhats, dists = joint_vae(views)
+    # yhat, poe_dist, yhats, dists = joint_vae(views)
 
-    loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists, var_beta = 0.01)
+    # loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists, var_beta = 0.01)
 
-    optimizer_vae.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(joint_vae.parameters(), 2.0)
-    optimizer_vae.step()
+    # optimizer_vae.zero_grad()
+    # loss.backward()
+    # torch.nn.utils.clip_grad_norm_(joint_vae.parameters(), 2.0)
+    # optimizer_vae.step()
 
-    train_acc_vae.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
+    # train_acc_vae.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
     
-    with torch.inference_mode():
-        yhat, poe_dist, yhats, dists = joint_vae([liptest_tensor, metabtest_tensor, protest_tensor])
+    # with torch.inference_mode():
+    #     yhat, poe_dist, yhats, dists = joint_vae([liptest_tensor, metabtest_tensor, protest_tensor])
 
-    test_acc_vae.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
+    # test_acc_vae.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
 
     # update the mlp
-    yhat, h, yhats, hiddens = joint_mlp(views)
+    yhat, h, yhats, hiddens = joint_mlp(*views)
 
     # pass the predictions and distributions to the loss function and update parameters
     _, _, loss = joint_mlp.loss(y_gt, yhat, yhats)
@@ -255,7 +268,7 @@ for i in range(3500):
     train_acc_mlp.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
 
     with torch.inference_mode():
-        yhat, h, yhats, hiddens = joint_mlp([liptest_tensor, metabtest_tensor, protest_tensor])
+        yhat, h, yhats, hiddens = joint_mlp(*[liptest_tensor, metabtest_tensor, protest_tensor])
 
     test_acc_mlp.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
 

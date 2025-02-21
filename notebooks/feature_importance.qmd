@@ -384,10 +384,39 @@ metab_baseline = metab_baseline[:,torch.randperm(metab_baseline.shape[1])]
 joint_model.eval()
 
 lip_igrad_scores, metab_igrad_scores, pro_igrad_scores = integrated_grads(
-    [liptest_pos, metabtest_pos, protest_pos], 
+    [lip_tensor, metab_tensor, pro_tensor], 
     [lip_baseline, metab_baseline, pro_baseline], 
     joint_model, n_steps = 100, class_idx = 0 # regrettably, 0 represents the 'Virus' condition here, no I'm not going to fix it.
 )
+
+pdb.runcall(integrated_grads, 
+    [lip_tensor, metab_tensor, pro_tensor], 
+    [lip_baseline, metab_baseline, pro_baseline], 
+    joint_model, n_steps = 100, class_idx = 0
+)
+
+# tensor([4.0772e-04, 8.8921e-05, 8.5952e-04, 8.6687e-04, 5.8168e-04])
+```
+
+```{python}
+from captum.attr import IntegratedGradients
+igrads = IntegratedGradients(joint_model_wrp)
+
+attributions_ig = igrads.attribute(
+    (lip_tensor, metab_tensor, pro_tensor), 
+    baselines = (lip_baseline, metab_baseline, pro_baseline),
+    target=0, n_steps=100,
+    method='riemann_right'
+)
+
+pdb.runcall(
+    igrads._attribute,
+    (lip_tensor, metab_tensor, pro_tensor), 
+    baselines = (lip_baseline, metab_baseline, pro_baseline),
+    target=0, n_steps=100,
+    method='riemann_right'
+)
+
 ```
 
 ```{python}

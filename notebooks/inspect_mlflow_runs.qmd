@@ -439,6 +439,8 @@ for i, row in run_df_binary[run_df_binary.start_time < pd.Timestamp("2024-9-12 1
             f.write("concat")
 ```
 
+# Tau v Noise Plots
+
 ```{python}
 # noise experiments shap vs igrads on ICL102
 
@@ -458,6 +460,9 @@ run_df = run_df.iloc[:10]
 
 # run with high dropout
 run_df = run_df[run_df['params.dropout'] == '0.5']
+
+# Jan 15, 2025, runs for VAE model, you could probably also do this by inspecting which had null igrad scores
+run_df = run_df.iloc[:10,:]
 
 run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
 run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
@@ -561,7 +566,7 @@ fig, axs = plt.subplots(1,2,figsize=(12,8), sharey=True)
 
 # sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
 sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0], legend=False)
-sns.boxplot(data = plot_df[plot_df['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1])
+sns.boxplot(data = plot_df[plot_df['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1], legend = False)
 
 axs[0].set_xlabel(None)
 axs[0].set_ylabel(None)
@@ -571,6 +576,7 @@ axs[1].set_xlabel(None)
 fig.supxlabel("Number of Noise Features")
 fig.supylabel("Kendall's Tau")
 fig.tight_layout()
+
 
 fig.savefig("output/layer_size_experiments/images/tau_noise_igrads_v_shap_large.png")
 
@@ -636,8 +642,4 @@ sns.boxplot(data = plot_df, x = 'n_noise', y = 'tau', hue = 'method', ax = ax)
 
 ax.set_xlabel('Number of Noise Features')
 ax.set_ylabel('Weighted Tau')
-
-
-
-
 ```
