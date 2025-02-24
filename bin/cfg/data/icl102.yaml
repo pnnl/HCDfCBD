@@ -1,0 +1,2 @@
+_target_: diomics.experiments.data.load_icl102_multiclass
+base_path: "/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024"

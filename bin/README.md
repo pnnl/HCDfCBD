@@ -2,19 +2,28 @@
 
 We run experiments regarding the effects of layer sizes and random noise on SHAP values, specifically how they affect rankings of biomolecules for the purposes of gleaning insight into the biological system.  To run any of the examples below, make sure you've installed everything in `requirements.txt`.
 
+## Data
+The data used in this experiment is provided as expression data along with a target column of virus type, split into train and test sets.  Specifically, the following files *for both ICL102 and ICL104*:
+
+- `lip_neg_train.csv`, `lip_neg_test.csv` 
+- `metab_train.csv`, `metab_test.csv` 
+- `pro_train.csv`, `pro_test.csv`
+
+Put these files in a folder of your choice.  The path of this folder will be specified when running scripts and it will be expected that these files (with the same names) will be found there.
+
 ## Running Scripts
 
-The experiments are organized via .yaml config files under `bin/cfg`.  These define parameters which are ingested into the experiment scripts via [hydra](https://hydra.cc/docs/intro/), essentially a fancy argparse.  The two immediate files in `bin/cfg` are the base configurations which specify default values.  For example, `bin/noise_experiments.py` is the entrypoint which ingests the config `bin/cfg/config-noise.yaml`.  Arguments can be changed similarly to running a python script:
+The experiments are organized via .yaml config files under `bin/cfg`.  These define parameters which are ingested into the experiment scripts via [hydra](https://hydra.cc/docs/intro/), essentially a fancy argparse.  The two immediate files in `bin/cfg` are the base configurations which specify default values.  For example, `bin/noise_experiments.py` is the entrypoint which ingests the config `bin/cfg/config-noise.yaml`.  Arguments can be changed similarly to running a python script, make sure to point the scripts to the folder you put the data in:
 
 ```bash
 # in base project directory
 export PYTHONPATH=.
 
 # use default values in bin/cfg/config-noise.yaml
-python bin/noise_experiments.py
+python bin/noise_experiments.py data.base_path=<your-data-folder-path>
 
 # change two parameters specified in the base config
-python bin/noise_experiments.py n_evals_per_noise=15 n_iters=1500
+python bin/noise_experiments.py n_evals_per_noise=15 n_iters=1500 data.base_path=<your-data-folder-path>
 ```
 
 To perform the full experiments, the configs in `bin/cfg/hydra/sweeper` define sweeps over various parameters such as layer sizes, combination schemes, and added noise levels in our experiments.  For example, the config `bin/cfg/hydra/sweeper/noise-sweep-binary-3view.yaml` is used to do the experiments where we vary layer size and noise in parallel with all 3 datasets to see the effect:
@@ -32,6 +41,8 @@ params:
 This config sweeps over many values of the `layer_x_noise` argument, which specifies levels of noise and layer sizes for each training run.  It will inherit all unspecified config options from the base config.  To run these sweeps:
 
 ```bash
+# again, adding `data.base_path=<your-data-folder-path>` to each command
+
 # use the above sweep config
 python bin/noise_experiments.py -m hydra/sweeper=noise-sweep-binary-3view
 

@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 
 from tqdm import tqdm
-import datetime
 import tempfile
 import pickle
 
@@ -21,105 +20,10 @@ import mlflow
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def load_icl102_multiclass():
-    train_lip = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/lip_neg_train.csv")
-    test_lip = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/lip_neg_test.csv")
-
-    train_metab = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/metab_train.csv")
-    test_metab = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/metab_test.csv")
-
-    train_pro = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/pro_train.csv")
-    test_pro = pd.read_csv("/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024/pro_test.csv")
-
-    ytrain = train_lip['y']
-    ytest = test_lip['y']
-
-    train_lip = train_lip.set_index("SampleID").drop("y", axis=1)
-    test_lip = test_lip.set_index("SampleID").drop("y", axis=1)
-
-    train_metab = train_metab.set_index("SampleID").drop("y", axis=1)
-    test_metab = test_metab.set_index("SampleID").drop("y", axis=1)
-
-    train_pro = train_pro.set_index("SampleID").drop("y", axis=1)
-    test_pro = test_pro.set_index("SampleID").drop("y", axis=1)
-
-    test_lip = test_lip - test_lip.median().median()
-    train_lip = train_lip - train_lip.median().median()
-
-    test_metab = test_metab - test_metab.median().median()
-    train_metab = train_metab - train_metab.median().median()
-
-    test_pro = test_pro - test_pro.median().median()
-    train_pro = train_pro - train_pro.median().median()
-
-    out_dict = {
-        'train_metab': train_metab,
-        'train_pro': train_pro,
-        'train_lip': train_lip,
-        'test_metab': test_metab,
-        'test_pro': test_pro,
-        'test_lip': test_lip,
-        'ytrain': ytrain,
-        'ytest': ytest
-    }
-
-    return out_dict
-
-def load_icl104_binary():
-    # proData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_edata_mlready.csv')
-    # lipData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_edata_mlready.csv')
-    # metabData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_edata_mlready.csv')
-
-    # pro_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_fdata_mlready.csv')
-    # lip_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_fdata_mlready.csv')
-    # metab_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_fdata_mlready.csv')
-
-    train_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_train.csv')
-    test_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_test.csv')
-
-    train_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_train.csv')
-    test_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_test.csv')
-
-    train_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_train.csv')
-    test_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_test.csv')
-
-    ytrain = train_lip['y']
-    ytest = test_lip['y']
-
-    train_lip = train_lip.set_index("SampleID").drop("y", axis=1)
-    test_lip = test_lip.set_index("SampleID").drop("y", axis=1)
-
-    train_metab = train_metab.set_index("SampleID").drop("y", axis=1)
-    test_metab = test_metab.set_index("SampleID").drop("y", axis=1)
-
-    train_pro = train_pro.set_index("SampleID").drop("y", axis=1)
-    test_pro = test_pro.set_index("SampleID").drop("y", axis=1)
-
-    test_lip = test_lip - test_lip.median().median()
-    train_lip = train_lip - train_lip.median().median()
-
-    test_metab = test_metab - test_metab.median().median()
-    train_metab = train_metab - train_metab.median().median()
-
-    test_pro = test_pro - test_pro.median().median()
-    train_pro = train_pro - train_pro.median().median()
-
-    out_dict = {
-        'train_metab': train_metab,
-        'train_pro': train_pro,
-        'train_lip': train_lip,
-        'test_metab': test_metab,
-        'test_pro': test_pro,
-        'test_lip': test_lip,
-        'ytrain': ytrain,
-        'ytest': ytest
-    }
-
-    return out_dict
 
 def train(joint_model, optimizer, views_orig, y_gt, n_iters = 1000, alpha = None, gamma = 3, prog = True, l1_penalty=None):
     train_acc = []
@@ -433,7 +337,7 @@ def main(cfg: DictConfig) -> None:
         mlflow.log_params(OmegaConf.to_container(cfg))
 
         # train/test, metab/pro/lip, ytrain, ytest
-        datadict = load_icl104_binary()
+        datadict = hydra.utils.instantiate(cfg['data'])
 
         train_x = [datadict['train_' + dset] for dset in cfg.datasets]
         

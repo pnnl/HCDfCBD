@@ -1,8 +1,8 @@
-numpy
+numpy==1.25.0
 pandas
 scikit-learn
 torch==2.0.1
-shap==0.4.3
+shap==0.43
 seaborn
 matplotlib
 mlflow

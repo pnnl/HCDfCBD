@@ -1,3 +1,7 @@
+defaults:
+  - _self_
+  - data: icl104
+
 layer_x_noise:
   n_noise: 100
   layer_sizes: [[64, 64], [512, 512]]
@@ -7,6 +11,7 @@ n_iters: 1250
 combine_fn: 'concat'
 experiment_name: noise-layer-experiments
 datasets: ['metab', 'lip']
+data_type:
 l1_penalty: null
 dropout: 0.2
 prog: false
