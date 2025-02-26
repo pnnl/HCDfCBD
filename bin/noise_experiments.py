@@ -361,10 +361,11 @@ def main(cfg: DictConfig) -> None:
         )
 
         # dump results to a tempfile and log as artifact:
-        with tempfile.NamedTemporaryFile() as tmp:
-            pickle.dump(results, tmp)
-            tmp.seek(0)
-            mlflow.log_artifact(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with open(f"{tmp_dir}/results.p") as tmp:
+                pickle.dump(results, tmp)
+                tmp.seek(0)
+                mlflow.log_artifact(tmp.name)
 
 
 if __name__ == "__main__":

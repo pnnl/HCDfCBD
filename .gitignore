@@ -59,7 +59,7 @@ target/
 
 # text files
 *.csv
-data/
+/data/
 
 # IPython
 profile_default/
