@@ -1,0 +1,1265 @@
+---
+title: Effects Bottleneck Size on Feature Importance 
+jupyter: python3
+---
+
+```{python}
+import sys
+sys.path.append('../')
+```
+
+```{python}
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+from diomics.models.multi_mlp import simple_FC, JointMLP
+from diomics.featimportance.shapley import JointMLPWrapper
+from diomics.featimportance.igrads import integrated_grads, average_igrads
+from diomics.featimportance.comparison import overlap_sets
+from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df, facet_force_plots
+import shap
+
+import numpy as np
+import pandas as pd
+import copy
+import datetime
+import re
+from tqdm.notebook import tqdm
+
+from sklearn.metrics import roc_curve, auc, confusion_matrix, v_measure_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from scipy.stats import weightedtau
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+
+import pickle
+```
+
+## Load ICL-104
+
+```{python}
+proData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_edata_mlready.csv')
+lipData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_edata_mlready.csv')
+metabData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_edata_mlready.csv')
+
+pro_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_fdata_mlready.csv')
+lip_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_fdata_mlready.csv')
+metab_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_fdata_mlready.csv')
+
+lipData.shape, metabData.shape, proData.shape
+```
+
+```{python}
+train_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_train.csv')
+test_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_test.csv')
+
+train_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_train.csv')
+test_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_test.csv')
+
+train_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_train.csv')
+test_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_test.csv')
+
+ytrain = train_lip['y']
+ytest = test_lip['y']
+
+train_lip = train_lip.set_index("SampleID").drop("y", axis=1)
+test_lip = test_lip.set_index("SampleID").drop("y", axis=1)
+
+train_metab = train_metab.set_index("SampleID").drop("y", axis=1)
+test_metab = test_metab.set_index("SampleID").drop("y", axis=1)
+
+train_pro = train_pro.set_index("SampleID").drop("y", axis=1)
+test_pro = test_pro.set_index("SampleID").drop("y", axis=1)
+```
+
+```{python}
+# 0-1 normalize everything
+# test_lip = (test_lip - np.min(test_lip)) / (np.max(test_lip) - np.min(test_lip))
+# train_lip = (train_lip - np.min(train_lip)) / (np.max(train_lip) - np.min(train_lip))
+
+# test_metab = (test_metab - np.min(test_metab)) / (np.max(test_metab) - np.min(test_metab))
+# train_metab = (train_metab - np.min(train_metab)) / (np.max(train_metab) - np.min(train_metab))
+
+# test_pro = (test_pro - np.min(test_pro)) / (np.max(test_pro) - np.min(test_pro))
+# train_pro = (train_pro - np.min(train_pro)) / (np.max(train_pro) - np.min(train_pro))
+
+# standard normalize everything using the statistics from the training data
+# test_lip = (test_lip - train_lip.mean())/train_lip.std()
+# train_lip = (train_lip - train_lip.mean())/train_lip.std()
+
+# test_metab = (test_metab - train_metab.mean())/train_metab.std()
+# train_metab = (train_metab - train_metab.mean())/train_metab.std()
+
+# test_pro = (test_pro - train_pro.mean())/train_pro.std()
+# train_pro = (train_pro - train_pro.mean())/train_pro.std()
+
+test_lip = test_lip - test_lip.median().median()
+train_lip = train_lip - train_lip.median().median()
+
+test_metab = test_metab - test_metab.median().median()
+train_metab = train_metab - train_metab.median().median()
+
+test_pro = test_pro - test_pro.median().median()
+train_pro = train_pro - train_pro.median().median()
+```
+
+```{python}
+# Add noise features to each dataset
+n_noise = 100
+
+lip_stds = train_lip.std().sample(n_noise)
+metab_stds = train_metab.std().sample(n_noise)
+pro_stds = train_pro.std().sample(n_noise)
+
+lip_means = train_lip.mean().sample(n_noise)
+metab_means = train_metab.mean().sample(n_noise)
+pro_means = train_pro.mean().sample(n_noise)
+
+train_lip_noise = np.random.normal(lip_means, lip_stds, (train_lip.shape[0], n_noise))
+train_metab_noise = np.random.normal(metab_means, metab_stds, (train_metab.shape[0], n_noise))
+train_pro_noise = np.random.normal(pro_means, pro_stds, (train_pro.shape[0], n_noise))
+
+train_lip_copy = train_lip.copy()
+train_metab_copy = train_metab.copy()
+train_pro_copy = train_pro.copy()
+
+# attach the noise to the copies
+train_lip_copy = pd.concat([train_lip_copy, pd.DataFrame(train_lip_noise, index = train_lip_copy.index)], axis = 1)
+train_metab_copy = pd.concat([train_metab_copy, pd.DataFrame(train_metab_noise, index = train_metab_copy.index)], axis = 1)
+train_pro_copy = pd.concat([train_pro_copy, pd.DataFrame(train_pro_noise, index = train_pro_copy.index)], axis = 1)
+```
+
+### First model with just Metabolites + Proteins
+
+```{python}
+# turn data into tensors
+tensor_1 = torch.tensor(train_metab.values, dtype = torch.float32)
+tensor_2 = torch.tensor(train_pro.values, dtype = torch.float32)
+tensor_3 = torch.tensor(train_metab_copy.values, dtype = torch.float32)
+
+views_orig = [tensor_1, tensor_2]
+views_aug = [tensor_3, tensor_2]
+
+y_gt = ytrain.astype('category').cat.codes
+y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+
+cat_names = ytrain.astype('category').cat.categories
+
+test_x = [test_metab, test_pro]
+test_y = ytest
+```
+
+```{python}
+train_acc = []
+test_acc = []
+
+# hyperparameters
+n_iters = 1250
+# class weights, data are balanced
+alpha = None
+gamma = 3
+
+# control the contribution of the marginal loss
+marginal_weight = 1
+
+# make a coefficient for the marginal losses proportional to the number of features of the corresponding dataset
+# marginal_coefs = [1/views[i].shape[1] for i in range(3)]
+# marginal_coefs = [marginal_coefs[i]/sum(marginal_coefs) for i in range(3)]
+marginal_coefs = [1, 1]
+```
+
+```{python}
+# three view-specific encoders with the appropriate input size:
+
+# the last hidden size must be the same since we are averaging
+last_hidden_size = 64
+dropout = 0.2
+
+# model using un-augmented data
+marg_1 = simple_FC(input_size=views_orig[0].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+marg_2 = simple_FC(input_size=views_orig[1].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+joint_model_orig = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+
+optimizer_orig = AdamW(joint_model_orig.parameters(), lr = 1e-4)
+
+# model using augmented data
+marg_1 = simple_FC(input_size=views_aug[0].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+marg_2 = simple_FC(input_size=views_aug[1].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+
+joint_model_aug = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+
+optimizer_aug = AdamW(joint_model_aug.parameters(), lr = 1e-4)
+
+# another model for the original dataset to compare the effect of random initialization
+marg_1 = simple_FC(input_size=views_orig[0].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+marg_2 = simple_FC(input_size=views_orig[1].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+
+joint_model_orig_rand = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+optimizer_orig_rand = AdamW(joint_model_orig_rand.parameters(), lr = 1e-4)
+```
+
+Set up training functions
+```{python}
+def train(joint_model, optimizer, views_orig, y_gt, n_iters = 1000, alpha = None, gamma = 3, prog = True):
+    train_acc = []
+    test_acc = []
+
+    if prog:
+        pbar = tqdm(range(n_iters))
+    else:
+        pbar = range(n_iters)
+
+    for i in pbar:
+        # update the mlp
+        yhat, h, yhats, hiddens = joint_model(*views_orig)
+
+        # pass the predictions and distributions to the loss function and update parameters
+        product_loss, marginal_losses, loss = joint_model.loss(y_gt, yhat, yhats, alpha = alpha, gamma = gamma)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        optimizer.step()
+
+        train_acc.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
+
+        if (i+1) % 10 == 0 and prog:
+            # update the tqdm message
+            pbar.set_postfix({'train_acc': train_acc[-1], 'loss': loss.item()})
+            # print(f'Iteration {i+1} loss: {loss.item():.3f}')
+
+    return joint_model, train_acc, test_acc
+
+def evaluate_overlap(shaps_1, shaps_2, n_features = 10):
+    # get the set intersection of the above
+    overlaps = set((-shaps_1).argsort()[:n_features]).intersection(set((-shaps_2).argsort()[:n_features]))
+    tau, _ = weightedtau(shaps_1, shaps_2)
+
+    return overlaps, tau
+
+def make_joint_model(input_size, hidden_sizes=[[128, 64, 64]]*2, dropout=0.2, **kwargs):
+    marg_1 = simple_FC(input_size=input_size[0], hidden_sizes=hidden_sizes[0], prediction_dim=ytrain.nunique(), dropout=dropout)
+    marg_2 = simple_FC(input_size=input_size[1], hidden_sizes=hidden_sizes[1], prediction_dim=ytrain.nunique(), dropout=dropout)
+
+    joint_model = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout, **kwargs)
+    optimizer = AdamW(joint_model.parameters(), lr = 1e-4)
+
+    return joint_model, optimizer
+
+def compare_shap_scores(
+    data_1, 
+    data_2, 
+    y, 
+    test_x,
+    test_y,
+    noise_levels=[100], 
+    hidden_sizes = [[128, 64, 64], [128, 64, 64]], 
+    n_evals_per_noise=10, 
+    prog=True,
+    **kwargs):
+    
+    results = {}
+
+    for n_noise, hs in zip(noise_levels, hidden_sizes):
+        # Add noise features to each dataset
+        stds_1 = data_1.std().sample(n_noise, replace = True)
+        stds_2 = data_2.std().sample(n_noise, replace = True)
+
+        means_1 = data_1.mean().sample(n_noise, replace = True)
+        means_2 = data_2.mean().sample(n_noise, replace = True)
+
+        data_1_noise = np.random.normal(means_1, stds_1, (data_1.shape[0], n_noise))
+        data_2_noise = np.random.normal(means_2, stds_2, (data_2.shape[0], n_noise))
+
+        data_1_noise_test = np.random.normal(means_1, stds_1, (test_x[0].shape[0], n_noise))
+
+        test_x_aug = [
+            pd.concat([test_x[0], pd.DataFrame(data_1_noise_test, index = test_x[0].index)], axis = 1),
+            test_x[1]
+        ]
+
+        test_tensors = [torch.tensor(test_x[0].values, dtype = torch.float32), torch.tensor(test_x[1].values, dtype = torch.float)]
+        test_tensors_aug = [torch.tensor(test_x_aug[0].values, dtype = torch.float32), torch.tensor(test_x_aug[1].values, dtype = torch.float32)]
+
+        data_1_copy = data_1.copy()
+        # data_2_copy = data_2.copy()
+
+        # attach the noise to the copies
+        data_1_copy = pd.concat([data_1_copy, pd.DataFrame(data_1_noise, index = data_1_copy.index)], axis = 1)
+        # data_2_copy = pd.concat([data_2_copy, pd.DataFrame(data_2_noise, index = data_2_copy.index)], axis = 1)
+
+        tensor_1 = torch.tensor(data_1.values, dtype = torch.float32)
+        tensor_2 = torch.tensor(data_2.values, dtype = torch.float32)
+        tensor_3 = torch.tensor(data_1_copy.values, dtype = torch.float32)
+
+        views_orig = [tensor_1, tensor_2]
+        views_aug = [tensor_3, tensor_2]
+        
+        cat_names = y.astype('category').cat.categories
+        y_gt = y.astype('category').cat.codes
+        y_gt = torch.tensor(y_gt.values, dtype=torch.int64)
+
+        by_model_results = {}
+
+        for i in range(n_evals_per_noise):
+            joint_model_orig, optimizer_orig = make_joint_model([views_orig[0].shape[1], views_orig[1].shape[1]], hs, 0.2, **kwargs)
+            joint_model_aug, optimizer_aug = make_joint_model([views_aug[0].shape[1], views_aug[1].shape[1]], hs, 0.2, **kwargs)
+            joint_model_orig_rand, optimizer_orig_rand = make_joint_model([views_orig[0].shape[1], views_orig[1].shape[1]], hs, 0.2, **kwargs)
+
+            joint_model_orig, train_acc, test_acc = train(joint_model_orig, optimizer_orig, views_orig, y_gt, n_iters = 1250, alpha = None, gamma = 3, prog=prog)
+            joint_model_aug, train_acc, test_acc = train(joint_model_aug, optimizer_aug, views_aug, y_gt, n_iters = 1250, alpha = None, gamma = 3, prog=prog)
+            joint_model_orig_rand, train_acc, test_acc = train(joint_model_orig_rand, optimizer_orig_rand, views_orig, y_gt, n_iters = 1250, alpha = None, gamma = 3, prog=prog)
+
+            # eval all models
+            joint_model_orig.eval()
+            joint_model_aug.eval()
+            joint_model_orig_rand.eval()
+
+            joint_model_orig_wrp = JointMLPWrapper(joint_model_orig)
+            explainer = shap.DeepExplainer(joint_model_orig_wrp, views_orig)
+            shap_values_orig = explainer.shap_values(views_orig, check_additivity=False)
+
+            joint_model_aug_wrp = JointMLPWrapper(joint_model_aug)
+            explainer = shap.DeepExplainer(joint_model_aug_wrp, views_aug)
+            shap_values_aug = explainer.shap_values(views_aug, check_additivity=False)
+
+            joint_model_orig_rand_wrp = JointMLPWrapper(joint_model_orig_rand)
+            explainer = shap.DeepExplainer(joint_model_orig_rand_wrp, views_orig)
+            shap_values_orig_rand = explainer.shap_values(views_orig, check_additivity=False)
+
+            ### Integrated Gradients
+            igrads_orig = average_igrads(views_orig, joint_model_orig, cat_names, n_steps = 50, n_runs = 10)
+            igrads_aug = average_igrads(views_aug, joint_model_aug, cat_names, n_steps = 50, n_runs = 10)
+            igrads_orig_rand = average_igrads(views_orig, joint_model_orig_rand, cat_names, n_steps = 50, n_runs = 10)
+
+            scores_1_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
+            scores_2_1 = np.abs(shap_values_aug[0][0]).mean(axis=0)
+
+            # remove the noise features
+            scores_2_1_trunc = scores_2_1[:data_1.shape[1]]
+
+            scores_3_1 = np.abs(shap_values_orig_rand[0][0]).mean(axis=0)
+
+            scores_1_2 = np.abs(shap_values_orig[0][1]).mean(axis=0)
+            scores_2_2 = np.abs(shap_values_aug[0][1]).mean(axis=0)
+            scores_3_2 = np.abs(shap_values_orig_rand[0][1]).mean(axis=0)
+
+            scores_1_all = np.concatenate([scores_1_1, scores_1_2])
+            scores_2_all = np.concatenate([scores_2_1_trunc, scores_2_2])
+            scores_3_all = np.concatenate([scores_3_1, scores_3_2])
+
+            # we expect that the overlap between the scores_1 and scores_2 to be lower than that of scores_1 and scores_3
+            # scores_1 = original # scores_2 = augmented # scores_3 = random initialization
+            overlap_1_2, tau_1_2 = evaluate_overlap(scores_1_all, scores_2_all)
+            overlap_1_3, tau_1_3 = evaluate_overlap(scores_1_all, scores_3_all)
+            overlap_2_3, tau_2_3 = evaluate_overlap(scores_2_all, scores_3_all)
+
+            y_gt_test = test_y.astype('category').cat.codes
+            y_gt_test = torch.tensor(y_gt_test.values, dtype=torch.int64)
+
+            # get test ROC for the original and augmented model:
+
+            # original data score
+            yhat, _, _, _ = joint_model_orig(*test_tensors)
+
+            logits = yhat.detach().numpy()
+            
+            if logits.shape[1] == 2:
+                logits = logits[:,1]
+
+            auc_orig = roc_auc_score(y_gt_test.numpy(), logits, multi_class = 'ovr')
+            
+            # augmented data score
+            yhat, _, _, _ = joint_model_aug(*test_tensors_aug)
+
+            logits = yhat.detach().numpy()
+            
+            if logits.shape[1] == 2:
+                logits = logits[:,1]
+
+            auc_aug = roc_auc_score(y_gt_test.numpy(), logits, multi_class = 'ovr')
+
+            by_model_results.setdefault('auc_orig', []).append(auc_orig)
+            by_model_results.setdefault('auc_aug', []).append(auc_aug)
+            by_model_results.setdefault('results_1_2', []).append((overlap_1_2, tau_1_2))
+            by_model_results.setdefault('results_1_3', []).append((overlap_1_3, tau_1_3))
+            by_model_results.setdefault('results_2_3', []).append((overlap_2_3, tau_2_3))
+            by_model_results.setdefault('shap_values_orig', []).append(shap_values_orig)
+            by_model_results.setdefault('shap_values_aug', []).append(shap_values_aug)
+            by_model_results.setdefault('shap_values_orig_rand', []).append(shap_values_orig_rand)
+
+        results[(n_noise, str(hs))] = by_model_results
+            
+    return results
+
+def collect_results(comparisons):
+    tau_scores = {k: {} for k in comparisons.keys()}
+    shap_mags = {k: {} for k in comparisons.keys()}
+
+    for k, comp in comparisons.items():
+        tau_scores[k]['tau_1_2'] = [el[1] for el in comp['results_1_2']]
+        tau_scores[k]['tau_1_3'] = [el[1] for el in comp['results_1_3']]
+
+        sv_orig_N, sv_orig_p = comp['shap_values_orig'][0][0][0].shape
+
+        shap_mags[k]['shap_mag_orig'] = [np.abs(el[0][0]).mean(axis=0) for el in comp['shap_values_orig']]
+        shap_mags[k]['shap_mag_aug'] = [np.abs(el[0][0][:, :sv_orig_p]).mean(axis=0) for el in comp['shap_values_aug']]
+        shap_mags[k]['shap_mag_orig_2'] = [np.abs(el[0][1]).mean(axis=0) for el in comp['shap_values_orig']]
+
+    return tau_scores, shap_mags
+
+def plot_tau(tau_dict, ax):
+    all_tau_v_noise = []
+
+    for k, v in tau_dict.items():
+        all_tau_v_noise += v['tau_1_3']
+
+    all_data = [all_tau_v_noise]
+
+    for k, v in tau_dict.items():
+        all_data.append(v['tau_1_2'])
+
+    # make the color the same across all boxplots
+    sns.boxplot(data = all_data, ax = ax, color = 'skyblue')
+    ax.set_xticklabels([0] + list(tau_dict.keys()))
+    ax.set_xlabel('Number of Noise Features')
+    ax.set_ylabel('Weighted Tau')
+    
+    # rotate x axis labels
+    ax.set_xticklabels(ax.get_xticklabels(), rotation = 90)
+```
+
+```{python}
+# train each model
+joint_model_orig, train_acc, test_acc = train(joint_model_orig, optimizer_orig, views_orig, y_gt, n_iters = n_iters, alpha = None, gamma = 3)
+joint_model_aug, train_acc, test_acc = train(joint_model_aug, optimizer_aug, views_aug, y_gt, n_iters = n_iters, alpha = None, gamma = 3)
+joint_model_orig_rand, train_acc, test_acc = train(joint_model_orig_rand, optimizer_orig_rand, views_orig, y_gt, n_iters = n_iters, alpha = None, gamma = 3)
+```
+
+```{python}
+# shap values for original data
+baselines = views_orig
+joint_model_orig_wrp = JointMLPWrapper(joint_model_orig)
+explainer = shap.DeepExplainer(joint_model_orig_wrp, baselines)
+shap_values_orig = explainer.shap_values(views_orig, check_additivity=False)
+
+# shap values for augmented data
+baselines = views_aug
+joint_model_aug_wrp = JointMLPWrapper(joint_model_aug)
+explainer = shap.DeepExplainer(joint_model_aug_wrp, baselines)
+shap_values_aug = explainer.shap_values(views_aug, check_additivity=False)
+
+# shap values for the second original model
+baselines = views_orig
+joint_model_orig_rand_wrp = JointMLPWrapper(joint_model_orig_rand)
+explainer = shap.DeepExplainer(joint_model_orig_rand_wrp, baselines)
+shap_values_orig_rand = explainer.shap_values(views_orig, check_additivity=False)
+```
+
+```{python}
+scores_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
+scores_2 = np.abs(shap_values_aug[0][0]).mean(axis=0)
+
+scores_1_prot = np.abs(shap_values_orig[0][1]).mean(axis=0)
+scores_2_prot = np.abs(shap_values_aug[0][1]).mean(axis=0)
+
+scores_1.argsort()[:20]
+scores_2.argsort()[:20]
+
+weightedtau(scores_1, scores_2)
+
+# remove the noise features
+scores_2_trunc = scores_2[:train_metab.shape[1]]
+
+# concatenate with the protein scores
+scores_2_all = np.concatenate([scores_2_trunc, scores_2_prot])
+scores_1_all = np.concatenate([scores_1, scores_1_prot])
+
+weightedtau(scores_1_all, scores_2_all)
+
+scores_1_all.argsort()[:40]
+scores_2_all.argsort()[:40]
+
+# get the set intersection of the above
+set((-scores_1_all).argsort()[:10]).intersection(set((-scores_2_all).argsort()[:10]))
+
+scores_3 = np.abs(shap_values_orig_rand[0][0]).mean(axis=0)
+scores_3_prot = np.abs(shap_values_orig_rand[0][1]).mean(axis=0)
+scores_3_all = np.concatenate([scores_3, scores_3_prot])
+
+evaluate_overlap(scores_1_all, scores_3_all)
+evaluate_overlap(scores_1_all, scores_2_all)
+```
+
+```{python}
+# compute the shapley values
+# [lip_baseline, metab_baseline, pro_baseline]
+# shap_values_orig = explainer.shap_values(views_orig, check_additivity=False)
+
+# shap_save = shap_values_orig
+
+scores_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
+scores_2 = np.abs(shap_save[0][0]).mean(axis=0)
+
+scores_1.argsort()[:20]
+scores_2.argsort()[:20]
+
+weightedtau(scores_1, scores_2)
+```
+
+## Manual Runs over different noise levels and random initializations
+
+```{python}
+results = compare_shap_scores(train_metab, train_pro, ytrain, noise_levels=[10, 100, 500, 1000, 5000], n_evals_per_noise=5)
+```
+
+```{python}
+results = compare_shap_scores(train_metab, train_pro, ytrain, noise_levels=[50, 5000], n_evals_per_noise=10)
+```
+
+```{python}
+pickle.dump(results, open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'wb'))
+```
+
+```{python}
+pickle.dump(results, open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'wb'))
+```
+
+```{python}
+results_orig = pickle.load(open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'rb'))
+results_50_5000 = pickle.load(open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'rb'))
+
+# combine these two dictionaries
+results = {**results_orig, **results_50_5000}
+```
+
+```{python}
+tau_50_1_2 = [el[1] for el in results[50]['results_1_2']]
+tau_50_1_3 = [el[1] for el in results[50]['results_1_3']]
+
+tau_100_1_2 = [el[1] for el in results[100]['results_1_2']]
+tau_100_1_3 = [el[1] for el in results[100]['results_1_3']]
+
+tau_500_1_2 = [el[1] for el in results[500]['results_1_2']]
+tau_500_1_3 = [el[1] for el in results[500]['results_1_3']]
+
+tau_1000_1_2 = [el[1] for el in results[1000]['results_1_2']]
+tau_1000_1_3 = [el[1] for el in results[1000]['results_1_3']]
+
+tau_5000_1_2 = [el[1] for el in results[5000]['results_1_2']]
+tau_5000_1_3 = [el[1] for el in results[5000]['results_1_3']]
+
+# the average magnitude of the shapley values from the original model
+shap_mag_50_orig = [np.abs(results[50]['shap_values_orig'][i][0][0]) for i in range(len(results[50]['shap_values_orig']))]
+shap_mag_50_aug = [np.abs(results[50]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[50]['shap_values_aug']))]
+
+shap_mag_100_orig = [np.abs(results[100]['shap_values_orig'][i][0][0]) for i in range(len(results[100]['shap_values_orig']))]
+shap_mag_100_aug = [np.abs(results[100]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[100]['shap_values_aug']))]
+
+shap_mag_500_orig = [np.abs(results[500]['shap_values_orig'][i][0][0]) for i in range(len(results[500]['shap_values_orig']))]
+shap_mag_500_aug = [np.abs(results[500]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[500]['shap_values_aug']))]
+
+shap_mag_1000_orig = [np.abs(results[1000]['shap_values_orig'][i][0][0]) for i in range(len(results[1000]['shap_values_orig']))]
+shap_mag_1000_aug = [np.abs(results[1000]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[1000]['shap_values_aug']))]
+
+shap_mag_5000_orig = [np.abs(results[5000]['shap_values_orig'][i][0][0]) for i in range(len(results[5000]['shap_values_orig']))]
+shap_mag_5000_aug = [np.abs(results[5000]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[5000]['shap_values_aug']))]
+
+shap_mag_50_orig_2 = [np.abs(results[50]['shap_values_orig'][i][0][1]) for i in range(len(results[50]['shap_values_orig']))]
+shap_mag_50_aug_2 = [np.abs(results[50]['shap_values_aug'][i][0][1]) for i in range(len(results[50]['shap_values_aug']))]
+
+shap_mag_100_orig_2 = [np.abs(results[100]['shap_values_orig'][i][0][1]) for i in range(len(results[100]['shap_values_orig']))]
+shap_mag_100_aug_2 = [np.abs(results[100]['shap_values_aug'][i][0][1]) for i in range(len(results[100]['shap_values_aug']))]
+
+shap_mag_500_orig_2 = [np.abs(results[500]['shap_values_orig'][i][0][1]) for i in range(len(results[500]['shap_values_orig']))]
+shap_mag_500_aug_2 = [np.abs(results[500]['shap_values_aug'][i][0][1]) for i in range(len(results[500]['shap_values_aug']))]
+
+shap_mag_1000_orig_2 = [np.abs(results[1000]['shap_values_orig'][i][0][1]) for i in range(len(results[1000]['shap_values_orig']))]
+shap_mag_1000_aug_2 = [np.abs(results[1000]['shap_values_aug'][i][0][1]) for i in range(len(results[1000]['shap_values_aug']))]
+
+shap_mag_5000_orig_2 = [np.abs(results[5000]['shap_values_orig'][i][0][1]) for i in range(len(results[5000]['shap_values_orig']))]
+shap_mag_5000_aug_2 = [np.abs(results[5000]['shap_values_aug'][i][0][1]) for i in range(len(results[5000]['shap_values_aug']))]
+```
+
+```{python}
+all_tau_v_noise = tau_50_1_3 + tau_100_1_3 + tau_500_1_3 + tau_1000_1_3 + tau_5000_1_3
+
+# make some boxplots of the tau values:
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+# make the color the same across all boxplots
+sns.boxplot(data = [all_tau_v_noise, tau_50_1_2, tau_100_1_2, tau_500_1_2, tau_1000_1_2, tau_5000_1_2], ax = ax, color = 'skyblue')
+ax.set_xticklabels([0, 50, 100, 500, 1000, 5000])
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig.tight_layout()
+plt.show()
+
+fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/tau_v_noise.png', dpi = 300)
+```
+
+```{python}
+# make boxplots of the absolute magnitude of the shapley values
+
+vals_50_orig = [sv.mean() for sv in shap_mag_50_orig]
+vals_100_orig = [sv.mean() for sv in shap_mag_100_orig]
+vals_500_orig = [sv.mean() for sv in shap_mag_500_orig]
+vals_1000_orig = [sv.mean() for sv in shap_mag_1000_orig]
+vals_5000_orig = [sv.mean() for sv in shap_mag_5000_orig]
+
+vals_50_aug = [sv.mean() for sv in shap_mag_50_aug]
+vals_100_aug = [sv.mean() for sv in shap_mag_100_aug]
+vals_500_aug = [sv.mean() for sv in shap_mag_500_aug]
+vals_1000_aug = [sv.mean() for sv in shap_mag_1000_aug]
+vals_5000_aug = [sv.mean() for sv in shap_mag_5000_aug]
+
+vals_50_orig_2 = [sv.mean() for sv in shap_mag_50_orig_2]
+vals_100_orig_2 = [sv.mean() for sv in shap_mag_100_orig_2]
+vals_500_orig_2 = [sv.mean() for sv in shap_mag_500_orig_2]
+vals_1000_orig_2 = [sv.mean() for sv in shap_mag_1000_orig_2]
+vals_5000_orig_2 = [sv.mean() for sv in shap_mag_5000_orig_2]
+
+vals_50_aug_2 = [sv.mean() for sv in shap_mag_50_aug_2]
+vals_100_aug_2 = [sv.mean() for sv in shap_mag_100_aug_2]
+vals_500_aug_2 = [sv.mean() for sv in shap_mag_500_aug_2]
+vals_1000_aug_2 = [sv.mean() for sv in shap_mag_1000_aug_2]
+vals_5000_aug_2 = [sv.mean() for sv in shap_mag_5000_aug_2]
+
+# grouped boxplot orig vs aug with n_noise as the x-axis
+all_orig_vals = vals_50_orig + vals_100_orig + vals_500_orig + vals_1000_orig + vals_5000_orig
+all_orig_vals_2 = vals_50_orig_2 + vals_100_orig_2 + vals_500_orig_2 + vals_1000_orig_2 + vals_5000_orig_2
+
+shap_mags = all_orig_vals + vals_50_aug + vals_100_aug + vals_500_aug + vals_1000_aug + vals_5000_aug
+shap_mags_2 = all_orig_vals_2 + vals_50_aug_2 + vals_100_aug_2 + vals_500_aug_2 + vals_1000_aug_2 + vals_5000_aug_2
+
+# all_orig_vals has 50 values, each of the augmentation levels has 10
+n_noise_features = [0]*50 + [50]*10 + [100]*10 + [500]*10 + [1000]*10 + [5000]*10
+
+#  concatenate shap_mags
+plot_df = pd.DataFrame({
+    'Shapley Magnitude': shap_mags,
+    'Shapeley Magnitude (Proteins)': shap_mags_2,
+    'Shapley Ratio': [shap_mags[i]/shap_mags_2[i] for i in range(len(shap_mags))],
+    'N Noise Features': n_noise_features,
+})
+
+```
+
+```{python}
+# plot of ratio between the metabolite and protein shapley values
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+sns.boxplot(data = plot_df, x = 'N Noise Features', y = 'Shapley Ratio', ax = ax, color = 'skyblue')
+
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Shapley Ratio')
+
+fig.tight_layout()
+
+plt.show()
+
+fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/shap_ratio_v_noise.png', dpi = 300)
+```
+
+```{python}
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+sns.boxplot(data = plot_df, x = 'N Noise Features', y = 'Shapley Magnitude', ax = ax, color = 'skyblue')
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Shapley Magnitude')
+
+fig.tight_layout()
+plt.show()
+
+fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/shap_mag_v_noise.png', dpi = 300)
+```
+
+```{python}
+# make a table of the tau scores and shapley magnitudes
+tau_scores = pd.DataFrame({
+    'N Noise Features': [50, 100, 500, 1000, 5000],
+    'Tau (vs Augmented)': [np.mean(tau_50_1_2), np.mean(tau_100_1_2), np.mean(tau_500_1_2), np.mean(tau_1000_1_2), np.mean(tau_5000_1_2)],
+    'Tau (vs Random)': [np.mean(tau_50_1_3), np.mean(tau_100_1_3), np.mean(tau_500_1_3), np.mean(tau_1000_1_3), np.mean(tau_5000_1_3)],
+    'Shapley Magnitude (Orig)': [np.mean(shap_mag_50_orig), np.mean(shap_mag_100_orig), np.mean(shap_mag_500_orig), np.mean(shap_mag_1000_orig), np.mean(shap_mag_5000_orig)],
+    'Shapley Magnitude (Aug)': [np.mean(shap_mag_50_aug), np.mean(shap_mag_100_aug), np.mean(shap_mag_500_aug), np.mean(shap_mag_1000_aug), np.mean(shap_mag_5000_aug)]
+}, index = [50, 100, 500, 1000, 5000])
+```
+
+# Experiments on Variation Across Training Runs
+```{python}
+# Lets train a bunch of models and see the variance in the results
+n_models = 10
+
+joint_models = []
+train_accs = []
+test_accs = []
+
+for i in range(n_models):
+    joint_model = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+    optimizer = AdamW(joint_model.parameters(), lr = 1e-4)
+    joint_model, train_acc, test_acc = train(joint_model, views_orig, y_gt, n_iters = 1000, alpha = None, gamma = 3)
+    joint_models.append(joint_model)
+    train_accs.append(train_acc)
+    test_accs.append(test_acc)
+```
+
+```{python}
+# get the shapley values for all models:
+shap_values = []
+
+for model in joint_models:
+    joint_model_wrp = JointMLPWrapper(model)
+    explainer = shap.DeepExplainer(joint_model_wrp, views_orig)
+    shap_values.append(explainer.shap_values(views_orig, check_additivity=False))
+
+# get the pairwise weighted tau scores for all models
+pairwise_tau = {}
+
+for i, shap_vals1 in enumerate(shap_values):
+    for j, shap_vals2 in enumerate(shap_values):
+        tau, _ = weightedtau(np.abs(shap_vals1[0][0]).mean(axis=0), np.abs(shap_vals2[0][0]).mean(axis=0))
+        pairwise_tau[(i, j)] = tau
+```
+
+```{python}
+# compare 10 runs where we average over 10 training runs
+all_shap_values = []
+
+# 10 runs
+n_runs = 10
+n_models = 30
+
+for i in range(n_runs):
+    joint_models = []
+    train_accs = []
+    test_accs = []
+    shap_values = []
+
+    # for reach run we do the thing where we loop over 10 models, but this time we average their output
+    for _ in range(n_models):
+        joint_model = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+        optimizer = AdamW(joint_model.parameters(), lr = 1e-4)
+        joint_model, train_acc, test_acc = train(joint_model, views_orig, y_gt, n_iters = 500, alpha = None, gamma = 3, prog = False)
+        joint_models.append(joint_model)
+        train_accs.append(train_acc)
+        test_accs.append(test_acc)
+    
+    # get the shapley values for all models:
+    for model in joint_models:
+        joint_model_wrp = JointMLPWrapper(model)
+        explainer = shap.DeepExplainer(joint_model_wrp, views_orig)
+        shap_values.append(explainer.shap_values(views_orig, check_additivity=False))
+
+    # average the shapley values into a single value
+    shap_values = np.median([np.abs(shap_vals[0][0]).mean(axis=0) for shap_vals in shap_values], axis = 0)
+    all_shap_values.append(shap_values)
+
+# compute the pairwise tau between all shap values
+pairwise_tau = {}
+
+for i, shap_vals1 in enumerate(all_shap_values):
+    for j, shap_vals2 in enumerate(all_shap_values):
+        tau, _ = weightedtau(shap_vals1, shap_vals2)
+        pairwise_tau[(i, j)] = tau
+```
+
+### Shapley Values
+
+Shapley values are a method of assigning importance to input variables.  The particular flavor of the Shapley values framework is a version of DEEPLift (Shrikumar, Greenside, and Kundaj, 2017), implemented in the SHAP packages (https://shap.readthedocs.io/en/latest/index.html) and modified with findings from (Lee and Lundberg, 2017).
+
+```{python}
+joint_model_wrp = JointMLPWrapper(joint_model)
+```
+
+```{python}
+# make baselines for the explainer object, 1000 samples centered around the mean
+# ACTUALLY: its okay to pass the training data here I think, since there arent that many samples.
+# lip_baseline = torch.randn(1000, lip_tensor.shape[1])/5 + lip_tensor.mean().numpy()
+# pro_baseline = torch.randn(1000, pro_tensor.shape[1])/5 + pro_tensor.mean().numpy()
+# metab_baseline = torch.randn(1000, metab_tensor.shape[1])/5 + metab_tensor.mean().numpy()
+
+# baselines = [lip_baseline, metab_baseline, pro_baseline]
+baselines = views_orig
+
+# make the explainer object
+explainer = shap.DeepExplainer(joint_model_wrp, baselines)
+```
+
+```{python}
+# compute the shapley values
+# [lip_baseline, metab_baseline, pro_baseline]
+shap_values_orig = explainer.shap_values(views_orig, check_additivity=False)
+
+# shap_save = shap_values_orig
+
+scores_1 = np.abs(shap_values_orig[0][0]).mean(axis=0)
+scores_2 = np.abs(shap_save[0][0]).mean(axis=0)
+
+scores_1.argsort()[:20]
+scores_2.argsort()[:20]
+
+weightedtau(scores_1, scores_2)
+```
+
+# Shapley Values for the augmented data
+
+```{python}
+marg_1 = simple_FC(input_size=views_aug[0].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+marg_2 = simple_FC(input_size=views_aug[1].shape[1], hidden_sizes=[128, 64, last_hidden_size], prediction_dim=ytrain.nunique(), dropout=dropout)
+
+# joint model
+joint_model_aug = JointMLP(marginal_models=[marg_1, marg_2], hidden_dim=64, dropout=dropout)
+
+optimizer = AdamW(joint_model_aug.parameters(), lr = 1e-4)
+```
+
+```{python}
+joint_model_wrp_aug = JointMLPWrapper(joint_model_aug)
+
+# baselines = [lip_baseline, metab_baseline, pro_baseline]
+baselines = views_aug
+
+# make the explainer object
+explainer = shap.DeepExplainer(joint_model_wrp_aug, baselines)
+```
+
+```{python}
+# compute the shapley values
+# [lip_baseline, metab_baseline, pro_baseline]
+shap_values_aug = explainer.shap_values(views_aug, check_additivity=False)
+```
+
+```{python}
+# compute the shapley values
+# Two models
+# 1. proteins + metabolites
+# 2. proteins + (metabolites + noise)
+scores_1 = np.abs(shap_values_orig[0][1]).mean(axis=0)
+scores_2 = np.abs(shap_values_aug[0][1]).mean(axis=0)
+
+scores_1.argsort()[:20]
+scores_2.argsort()[:20]
+```
+
+```{python}
+weightedtau(scores_1, scores_2)
+```
+
+## Compute Weighted Kendalls Tau between feature rankings of each output
+
+```{python}
+# lipids
+lipid_corrs = {}
+
+# loop over pairs of cat_names
+for i in range(len(cat_names)):
+    for j in range(i+1, len(cat_names)):
+        # compute the correlation between the shap values
+        corr, _ = weightedtau(np.abs(shap_values[i][0]).mean(axis=0), np.abs(shap_values[j][0]).mean(axis=0))
+        lipid_corrs[(cat_names[i], cat_names[j])] = corr
+
+# metablites
+metab_corrs = {}
+
+# loop over pairs of cat_names
+for i in range(len(cat_names)):
+    for j in range(i+1, len(cat_names)):
+        # compute the correlation between the shap values
+        corr, _ = weightedtau(np.abs(shap_values[i][1]).mean(axis=0), np.abs(shap_values[j][1]).mean(axis=0))
+        metab_corrs[(cat_names[i], cat_names[j])] = corr
+
+# metablites
+protein_corrs = {}
+
+# loop over pairs of cat_names
+for i in range(len(cat_names)):
+    for j in range(i+1, len(cat_names)):
+        # compute the correlation between the shap values
+        corr, _ = weightedtau(np.abs(shap_values[i][2]).mean(axis=0), np.abs(shap_values[j][2]).mean(axis=0))
+        protein_corrs[(cat_names[i], cat_names[j])] = corr
+```
+
+# Sweep Over Noise Levels and Layer Sizes
+
+```{python}
+# define noise levels and 
+# noise_levels=[100, 500, 1000, 2500, 5000]
+noise_levels = [100, 2500, 100, 2500]
+
+multipliers = [np.log2(1 + sz/120) for sz in noise_levels]
+
+hidden_sizes = [
+    [[int(m*128), int(m*64)], [128, 16]]
+    for m in multipliers[:-1]
+]
+
+hidden_sizes.extend([[[128, 64], [512, 128]], [[128, 64], [512, 128]]])
+```
+
+```{python}
+# get them results!
+results = compare_shap_scores(
+    train_metab, train_pro, ytrain, 
+    noise_levels=noise_levels, 
+    hidden_sizes=hidden_sizes,
+    n_evals_per_noise=5,
+    combine_fn='concat'
+)
+```
+
+```{python}
+tau_2500_1_2 = [el[1] for el in results[2500]['results_1_2']]
+tau_2500_1_3 = [el[1] for el in results[2500]['results_1_3']]
+
+tau_100_1_2 = [el[1] for el in results[100]['results_1_2']]
+tau_100_1_3 = [el[1] for el in results[100]['results_1_3']]
+
+tau_500_1_2 = [el[1] for el in results[500]['results_1_2']]
+tau_500_1_3 = [el[1] for el in results[500]['results_1_3']]
+
+tau_1000_1_2 = [el[1] for el in results[1000]['results_1_2']]
+tau_1000_1_3 = [el[1] for el in results[1000]['results_1_3']]
+
+tau_5000_1_2 = [el[1] for el in results[5000]['results_1_2']]
+tau_5000_1_3 = [el[1] for el in results[5000]['results_1_3']]
+
+# the average magnitude of the shapley values from the original model
+shap_mag_2500_orig = [np.abs(results[2500]['shap_values_orig'][i][0][0]) for i in range(len(results[2500]['shap_values_orig']))]
+shap_mag_2500_aug = [np.abs(results[2500]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[2500]['shap_values_aug']))]
+
+shap_mag_100_orig = [np.abs(results[100]['shap_values_orig'][i][0][0]) for i in range(len(results[100]['shap_values_orig']))]
+shap_mag_100_aug = [np.abs(results[100]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[100]['shap_values_aug']))]
+
+shap_mag_500_orig = [np.abs(results[500]['shap_values_orig'][i][0][0]) for i in range(len(results[500]['shap_values_orig']))]
+shap_mag_500_aug = [np.abs(results[500]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[500]['shap_values_aug']))]
+
+shap_mag_1000_orig = [np.abs(results[1000]['shap_values_orig'][i][0][0]) for i in range(len(results[1000]['shap_values_orig']))]
+shap_mag_1000_aug = [np.abs(results[1000]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[1000]['shap_values_aug']))]
+
+shap_mag_5000_orig = [np.abs(results[5000]['shap_values_orig'][i][0][0]) for i in range(len(results[5000]['shap_values_orig']))]
+shap_mag_5000_aug = [np.abs(results[5000]['shap_values_aug'][i][0][0][:, :train_metab.shape[1]]) for i in range(len(results[5000]['shap_values_aug']))]
+
+shap_mag_2500_orig_2 = [np.abs(results[2500]['shap_values_orig'][i][0][1]) for i in range(len(results[2500]['shap_values_orig']))]
+shap_mag_2500_aug_2 = [np.abs(results[2500]['shap_values_aug'][i][0][1]) for i in range(len(results[2500]['shap_values_aug']))]
+
+shap_mag_100_orig_2 = [np.abs(results[100]['shap_values_orig'][i][0][1]) for i in range(len(results[100]['shap_values_orig']))]
+shap_mag_100_aug_2 = [np.abs(results[100]['shap_values_aug'][i][0][1]) for i in range(len(results[100]['shap_values_aug']))]
+
+shap_mag_500_orig_2 = [np.abs(results[500]['shap_values_orig'][i][0][1]) for i in range(len(results[500]['shap_values_orig']))]
+shap_mag_500_aug_2 = [np.abs(results[500]['shap_values_aug'][i][0][1]) for i in range(len(results[500]['shap_values_aug']))]
+
+shap_mag_1000_orig_2 = [np.abs(results[1000]['shap_values_orig'][i][0][1]) for i in range(len(results[1000]['shap_values_orig']))]
+shap_mag_1000_aug_2 = [np.abs(results[1000]['shap_values_aug'][i][0][1]) for i in range(len(results[1000]['shap_values_aug']))]
+
+shap_mag_5000_orig_2 = [np.abs(results[5000]['shap_values_orig'][i][0][1]) for i in range(len(results[5000]['shap_values_orig']))]
+shap_mag_5000_aug_2 = [np.abs(results[5000]['shap_values_aug'][i][0][1]) for i in range(len(results[5000]['shap_values_aug']))]
+```
+
+```{python}
+tau_scores, shap_mags = collect_results(results)
+```
+
+```{python}
+# use reduce to combine the tau_1_3 in the results
+all_tau_v_noise = []
+
+for k, v in tau_scores.items():
+    all_tau_v_noise += v['tau_1_3']
+
+all_data = [all_tau_v_noise]
+
+for k, v in tau_scores.items():
+    all_data.append(v['tau_1_2'])
+
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+# make the color the same across all boxplots
+sns.boxplot(data = all_data, ax = ax, color = 'skyblue')
+ax.set_xticklabels([0] + list(tau_scores.keys()))
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+results_plus = compare_shap_scores(
+    train_metab, train_pro, ytrain, 
+    noise_levels=[2500], 
+    hidden_sizes=[[[569,284], [128, 16]]],
+    n_evals_per_noise=5,
+    combine_fn='concat'
+)
+
+tau_plus, shap_plus = collect_results(results_plus)
+```
+
+```{python}
+all_tau = {**tau_scores, **tau_plus}
+
+# use reduce to combine the tau_1_3 in the results
+all_tau_v_noise = []
+
+for k, v in all_tau.items():
+    all_tau_v_noise += v['tau_1_3']
+
+all_data = [all_tau_v_noise]
+
+for k, v in all_tau.items():
+    all_data.append(v['tau_1_2'])
+
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+# make the color the same across all boxplots
+sns.boxplot(data = all_data, ax = ax, color = 'skyblue')
+ax.set_xticklabels([0] + list(all_tau.keys()))
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig.tight_layout()
+plt.show()    
+```
+
+```{python}
+all_tau_v_noise = tau_100_1_3 + tau_500_1_3 + tau_1000_1_3 + tau_2500_1_3 + tau_5000_1_3
+
+# make some boxplots of the tau values:
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+# make the color the same across all boxplots
+sns.boxplot(data = [all_tau_v_noise, tau_100_1_2, tau_500_1_2, tau_1000_1_2, tau_2500_1_2, tau_5000_1_2], ax = ax, color = 'skyblue')
+ax.set_xticklabels([0, 100, 500, 1000, 2500, 5000])
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig.tight_layout()
+plt.show()
+```
+
+```{python}
+# define noise levels and subsequently layer sizes based on a multiplier
+orig_sizes = [[64, 64], [512, 512]]
+
+# the original ratio between input sizes is....
+p1_size = train_metab.shape[1]
+p2_size = train_pro.shape[1]
+orig_ratio = train_metab.shape[1]/train_pro.shape[1]
+
+n_noise = [100, 500, 1000, 2500, 4000]
+layer_sizes = [orig_sizes] * 5
+
+mults = []
+
+```
+
+```{python}
+# Scheme 1
+for nl in n_noise:
+    # compute the new input size
+    mult = (1 + nl/p1_size)**5
+
+    mults.append(mult)
+
+    new_sizes = orig_sizes.copy()
+
+    # new_x_solver = -tensor_1.shape[1] + np.sqrt()
+
+    new_sizes[0] = [int(sz * mult ** 0.5) for sz in new_sizes[0]]
+    new_sizes[1] = [int(sz / mult ** 0.5) for sz in new_sizes[1]]
+
+    layer_sizes.append(new_sizes)
+
+n_noise = n_noise * 2
+```
+
+
+## METAB VS LIPID
+```{python}
+# define noise levels and subsequently layer sizes based on a multiplier
+orig_sizes = [[128, 128], [256, 256]]
+
+# the original ratio between input sizes is....
+p1_size = train_metab.shape[1]
+p2_size = train_lip.shape[1]
+orig_ratio = train_metab.shape[1]/train_lip.shape[1]
+
+n_noise = [100, 500, 1000, 2500, 4000]
+layer_sizes = [orig_sizes] * 5
+
+mults = []
+
+for nl in n_noise:
+    # compute the new input size
+    mult = (1 + nl/p1_size)**0.5
+
+    mults.append(mult)
+
+    new_sizes = orig_sizes.copy()
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1], train_lip.shape[1]], 
+        hidden_sizes = orig_sizes,
+        combine_fn = "concat"
+    )
+
+    # get number of parameters in jmodel:
+    # n_params_0 = sum(p.numel() for p in jmodel.margin_models[0].parameters())
+    # n_params_1 = sum(p.numel() for p in jmodel.margin_models[1].parameters())
+
+    n_params_0 = orig_sizes[0][0]**2
+    n_params_1 = orig_sizes[1][0]**2
+
+    # a = 1, b = (1 + d_in), c = mult * n_params, solve for x with quadratic formula:
+    # x = (-b + sqrt(b^2 - 4ac))/2a
+    x_0 = (-1 + np.sqrt(1 + 4 * mult * n_params_0))/2
+
+    # now with c = n_params/mult
+    x_1 = (-1 + np.sqrt(1 + 4 * n_params_1/mult))/2
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1] + nl, train_lip.shape[1]], 
+        hidden_sizes = [[int(x_0)]*2, [int(x_1)]*2],
+        combine_fn = "concat"
+    )
+
+    new_sizes[0] = [int(x_0)]*2
+    new_sizes[1] = [int(x_1)]*2
+
+    layer_sizes.append(new_sizes)
+
+n_noise = n_noise * 2
+```
+
+## METAB VS PROTEIN
+```{python}
+# define noise levels and subsequently layer sizes based on a multiplier
+orig_sizes = [[64, 64], [512, 512]]
+
+# the original ratio between input sizes is....
+p1_size = train_metab.shape[1]
+p2_size = train_pro.shape[1]
+orig_ratio = train_metab.shape[1]/train_pro.shape[1]
+
+n_noise = [100, 500, 1000, 2500, 4000]
+layer_sizes = [orig_sizes] * 5
+
+mults = []
+
+for nl in n_noise:
+    # compute the new input size
+    mult = (1 + nl/p1_size)**0.5
+
+    mults.append(mult)
+
+    new_sizes = orig_sizes.copy()
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1], train_pro.shape[1]], 
+        hidden_sizes = orig_sizes,
+        combine_fn = "concat"
+    )
+
+    # get number of parameters in jmodel:
+    # n_params_0 = sum(p.numel() for p in jmodel.margin_models[0].parameters())
+    # n_params_1 = sum(p.numel() for p in jmodel.margin_models[1].parameters())
+
+    n_params_0 = 64**2
+    n_params_1 = 512**2
+
+    # a = 1, b = (1 + d_in), c = mult * n_params, solve for x with quadratic formula:
+    # x = (-b + sqrt(b^2 - 4ac))/2a
+    x_0 = (-1 + np.sqrt(1 + 4 * mult * n_params_0))/2
+
+    # now with c = n_params/mult
+    x_1 = (-1 + np.sqrt(1 + 4 * n_params_1/mult))/2
+
+    jmodel, _ = make_joint_model(
+        input_size = [train_metab.shape[1] + nl, train_pro.shape[1]], 
+        hidden_sizes = [[int(x_0)]*2, [int(x_1)]*2],
+        combine_fn = "concat"
+    )
+
+    new_sizes[0] = [int(x_0)]*2
+    new_sizes[1] = [int(x_1)]*2
+
+    layer_sizes.append(new_sizes)
+
+n_noise = n_noise * 2
+```
+
+```{python}
+# get them results!
+results_squeeze = compare_shap_scores(
+    train_metab, train_pro, ytrain, 
+    noise_levels=n_noise, 
+    hidden_sizes=layer_sizes,
+    n_evals_per_noise=5,
+    combine_fn='concat',
+    test_x = test_x,
+    test_y = test_y,
+    prog=False
+)
+
+thetime = datetime.datetime.now().strftime("%Y-%m-%d")
+
+pickle.dump(results_squeeze, open(f"/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_{thetime}.pkl", 'wb'))
+```
+
+```{python}
+# plot the data, optionally load previous results
+results_squeeze = pickle.load(open('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_2024-10-15.pkl', 'rb'))
+
+tau_squeeze, shap_squeeze = collect_results(results_squeeze)
+
+# rename the keys of tau_squeeze
+new_tau = {}
+
+for (i, k1), m in zip(enumerate(tau_squeeze.keys()), mults * 2):
+    if i < 5:
+        new_k = n_noise[i]
+    else:
+        new_k = (n_noise[i], "{:.2f}".format(m))
+
+    new_tau[new_k] = tau_squeeze[k1]
+
+fig, ax = plt.subplots(1, 1, figsize = (10, 6))
+
+plot_tau(new_tau, ax)
+
+ax.set_xlabel('Number of noise features, multiplier')
+# rotate
+fig.tight_layout()
+
+fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/fixed_vs_variable_layer_tau.png', dpi = 300)
+```
+
+```{python}
+def print_auc(results):
+    for k, v in results.items():
+        auc_aug = v['auc_aug']
+        auc_orig = v['auc_orig']
+        print(f"{k}, original auc: {auc_orig}, augmented auc {auc_aug}")
+```
+
+```{python}
+model_sizes = []
+
+for ls, nl in zip(layer_sizes, n_noise):
+    # get the number of parameters in the model for these values:
+
+    jm, opt = make_joint_model(
+        input_size = [train_metab.shape[1] + nl, train_pro.shape[1]], 
+    )
+
+    n_params = sum(p.numel() for p in jm.parameters())
+
+    model_sizes.append(n_params)
+```

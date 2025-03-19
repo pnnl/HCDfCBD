@@ -7,5 +7,5 @@ class JointMLPWrapper(nn.Module):
         self.model = model
 
     def forward(self, *datas):
-        yhat, _, _, _ = self.model(datas)
+        yhat, _, _, _ = self.model(*datas)
         return yhat

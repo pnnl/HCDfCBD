@@ -1,0 +1,8 @@
+# @package _global_
+# @package hydra.sweeper
+_target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+max_batch_size: null
+params:
+  layer_x_noise: "{layer_sizes: [[128, 128], [256, 256], [512, 512]], n_noise:100}, {layer_sizes:[[128, 128], [256, 256], [512, 512]], n_noise:500}, {layer_sizes:[[128, 128], [256, 256], [512, 512]], n_noise:1000}, {layer_sizes:[[128, 128], [256, 256], [512, 512]], n_noise:2500}, {layer_sizes:[[128, 128], [256, 256], [512, 512]], n_noise:4000}, {layer_sizes:[[148, 148], [219, 219], [438, 438]], n_noise:100}, {layer_sizes:[[192, 192], [169, 169], [338, 338]], n_noise:500}, {layer_sizes:[[223, 223], [145, 145], [290, 290]], n_noise:1000}, {layer_sizes:[[276, 276], [117, 117], [234, 234]], n_noise:2500}, {layer_sizes:[[309, 309], [105, 105], [210, 210]], n_noise:4000}"
+  datasets: ['metab', 'lip', 'pro']
+  experiment_name: noise-exp-3view-binary

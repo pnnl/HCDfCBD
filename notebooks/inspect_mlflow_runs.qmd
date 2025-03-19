@@ -1,0 +1,645 @@
+---
+title: Variable Importance
+jupyter: dataharm
+---
+
+```{python}
+import sys
+sys.path.append('../')
+```
+
+```{python}
+import torch
+
+from diomics.models.multi_mlp import simple_FC, JointMLP, make_joint_model
+from diomics.featimportance.igrads import integrated_grads
+from diomics.featimportance.comparison import overlap_sets
+from diomics.featimportance.plot_helpers import igrad_beeswarm_plot, make_igrad_plot_df, facet_force_plots
+import shap
+from scipy.stats import weightedtau
+from sklearn.metrics import roc_auc_score, confusion_matrix
+
+import numpy as np
+import pandas as pd
+import copy
+import pickle
+import datetime
+import re
+import itertools
+from tqdm.notebook import tqdm
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+
+import mlflow
+```
+
+# Examine Concatenation Experiment
+
+```{python}
+# mlflow list artifacts
+concat_exp = mlflow.get_experiment_by_name("icl-multiclass")
+
+run_df = mlflow.search_runs([concat_exp.experiment_id])
+run_df = run_df.sort_values(by='metrics.test_accuracy', ascending=False)
+
+best_run_id = run_df.iloc[0].run_id
+
+def get_run_artifacts(run_id):
+    artifact_uri = mlflow.get_run(run_id).info.artifact_uri
+    artifact_base_path = re.sub("^file://", "", artifact_uri)
+    all_artifacts = mlflow.artifacts.list_artifacts(run_id=run_id)
+    return artifact_base_path, all_artifacts
+
+artifact_uri = mlflow.get_run(best_run_id).info.artifact_uri
+artifact_base_path = re.sub("^file://", "", artifact_uri)
+
+all_artifacts = mlflow.artifacts.list_artifacts(run_id=best_run_id)
+
+shapley_artifacts = [a.path for a in all_artifacts if "shapley_values" in a.path]
+shapley_pkl = [a for a in shapley_artifacts if a.endswith(".pkl")][0]
+shap_vals = pickle.load(open(os.path.join(artifact_base_path, shapley_pkl), "rb"))
+
+# get all the shapley values
+shap_vals_dict = {}
+
+for rid in run_df.run_id:
+    artifacts_base_path, artifacts = get_run_artifacts(rid)
+    shap_vals_dict[rid] = pickle.load(open(os.path.join(artifacts_base_path, shapley_pkl), "rb"))
+```
+
+```{python}
+rid = run_df.iloc[0].run_id
+artifacts_base_path, artifacts = get_run_artifacts(rid)
+shap_vals_dict[rid] = pickle.load(open(os.path.join(artifacts_base_path, shapley_pkl), "rb"))
+
+rid = run_df.iloc[1].run_id
+artifacts_base_path, artifacts = get_run_artifacts(rid)
+shap_vals_dict[rid] = pickle.load(open(os.path.join(artifacts_base_path, shapley_pkl), "rb"))
+```
+
+```{python}
+plt.figure(figsize=(20, 10))
+
+for i, (rid, shap_vals) in enumerate(shap_vals_dict.items()):
+    plt.subplot(1, 2, i+1)
+    shap.summary_plot(shap_vals[0][0], show = False, plot_size=None)
+
+shap.summary_plot(shap_vals_dict[0][0])
+```
+
+```{python}
+from scipy.stats import weightedtau
+import itertools
+
+def get_weighted_tau(shap_vals1, shap_vals2):
+    shap_vals1 = shap_vals1.std(axis=0)
+    shap_vals2 = shap_vals2.std(axis=0)
+    tau, p_value = weightedtau(shap_vals1, shap_vals2)
+    return tau, p_value
+```
+
+```{python}
+pairwise_tau_by_subset = {}
+
+one_shap = next(shap_vals_dict.items().__iter__())
+
+for data_idx in range(len(one_shap[1])):
+    for output_idx in range(len(one_shap[1][data_idx])):
+        pairwise_tau = {}
+        for (rid1, shap_vals1), (rid2, shap_vals2) in itertools.combinations(shap_vals_dict.items(), 2):
+            tau, _ = get_weighted_tau(shap_vals1[data_idx][output_idx], shap_vals2[data_idx][output_idx])
+            pairwise_tau[(rid1, rid2)] = tau
+        pairwise_tau_by_subset[(data_idx, output_idx)] = pairwise_tau
+```
+
+```{python}
+def make_tau_df(pairwise_tau_dict):
+    # labeled dataframe
+    tau_df = pd.DataFrame(
+        columns = ['tau', 'layer_sizes1', 'layer_sizes2', 'hidden_dim1', 'hidden_dim2']
+    )
+
+    for k, v in pairwise_tau_dict.items():
+        exp1 = mlflow.get_run(k[0])
+        exp2 = mlflow.get_run(k[1])
+
+        layer_sizes1 = exp1.data.params['hidden_sizes']
+        layer_sizes2 = exp2.data.params['hidden_sizes']
+
+        hidden_dim1 = exp1.data.params['hidden_dim']
+        hidden_dim2 = exp2.data.params['hidden_dim']
+        tau_df = pd.concat([tau_df, pd.DataFrame({
+            'tau': [v],
+            'layer_sizes1': [layer_sizes1],
+            'layer_sizes2': [layer_sizes2],
+            'hidden_dim1': [hidden_dim1],
+            'hidden_dim2': [hidden_dim2]
+        })])
+
+    return tau_df
+
+# lip, metab, pro
+tau_df_0_0 = make_tau_df(pairwise_tau_by_subset[(0, 0)])
+```
+
+```{python}
+# see if the 'full' order is still mixed
+shaps_zero = shap_vals_dict['5e045a2e2ea0483e8e92849d79e9ddcd'][0]
+
+# concatenate along the 1st axis
+shaps_zero_concat = np.concatenate(shaps_zero, axis=1)
+
+pairwise_tau_concat = {}
+
+for (rid1, shap_vals1), (rid2, shap_vals2) in itertools.combinations(shap_vals_dict.items(), 2):
+    shap_vals1 = np.concatenate(shap_vals1[0], axis=1)
+    shap_vals2 = np.concatenate(shap_vals2[0], axis=1)
+    tau, _ = get_weighted_tau(shap_vals1, shap_vals2)
+    pairwise_tau_concat[(rid1, rid2)] = tau
+```
+
+```{python}
+# labeled dataframe
+tau_df_concat_shap = make_tau_df(pairwise_tau_concat)
+```
+
+# Igrads
+
+```{python}
+# get all the shapley values
+igrad_scores_dict = {}
+
+igrad_fname = 'igrad_scores_Mock.pkl'
+
+for rid in run_df.run_id:
+    artifacts_base_path, artifacts = get_run_artifacts(rid)
+    igrad_scores_dict[rid] = pickle.load(open(os.path.join(artifacts_base_path, igrad_fname), "rb"))
+```
+
+```{python}
+pairwise_tau_concat_igrads = {}
+
+for (rid1, igrads1), (rid2, igrads2) in itertools.combinations(igrad_scores_dict.items(), 2):
+    igrads1 = np.concatenate(igrads1[0], axis=1)
+    igrads2 = np.concatenate(igrads2[0], axis=1)
+    tau, _ = get_weighted_tau(igrads1, igrads2)
+    pairwise_tau_concat_igrads[(rid1, rid2)] = tau
+
+tau_df_concat_igrad = make_tau_df(pairwise_tau_concat)
+```
+
+## Compare ROC_AUC scores across models
+```{python}
+binary_exp = mlflow.get_experiment_by_name("icl-binary")
+run_df_binary = mlflow.search_runs([binary_exp.experiment_id])
+
+# get the timestamp 2 weeks before this
+cutoff = pd.Timestamp("2024-10-7 12:30:45", tz="UTC")
+
+run_df_binary = run_df_binary[run_df_binary.start_time > cutoff]
+
+# roc_auc of mean and concat
+roc_auc_mean_igrad = run_df_binary[run_df_binary['params.combine_fn'] == "mean"]['metrics.test_auc_RF_igrads_Cal04_0.1']
+roc_auc_concat_igrad = run_df_binary[run_df_binary['params.combine_fn'] == "concat"]['metrics.test_auc_RF_igrads_Cal04_0.1']
+
+(roc_auc_mean_igrad.mean(), roc_auc_concat_igrad.mean())
+
+roc_auc_mean_shapley = run_df_binary[run_df_binary['params.combine_fn'] == "mean"]['metrics.test_auc_RF_shapley_Cal04_0.1']
+roc_auc_concat_shapley = run_df_binary[run_df_binary['params.combine_fn'] == "concat"]['metrics.test_auc_RF_shapley_Cal04_0.1']
+
+(roc_auc_mean_shapley.mean(), roc_auc_concat_shapley.mean())
+
+```
+
+```{python}
+# multiclass
+multiclass_exp = mlflow.get_experiment_by_name("icl-multiclass")
+run_df_multiclass = mlflow.search_runs([multiclass_exp.experiment_id])
+
+cutoff = pd.Timestamp("2024-09-12 12:30:45", tz="UTC")
+run_df_multiclass = run_df_multiclass[run_df_multiclass.start_time > cutoff]
+
+roc_auc_mean_multiclass = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "mean"]['metrics.roc_auc']
+
+roc_auc_concat_multiclass = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "concat"]['metrics.roc_auc']
+
+(roc_auc_mean_multiclass.mean(), roc_auc_concat_multiclass.mean())
+
+# make boxplots of the two scores between mean and concat:
+fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+sns.boxplot(data = run_df_multiclass, x = 'params.combine_fn', y = 'metrics.roc_auc', ax = ax)
+
+plt.xlabel("Combine Function")
+plt.ylabel("ROC AUC")
+
+fig.savefig("output/layer_size_experiments/images/roc_auc_multiclass.png")
+
+## multiclass with 0.1 features based on...
+
+# shapley values
+sub_shapley_mean = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "mean"]['metrics.test_auc_RF_shapley_691_0.1']
+sub_shapley_concat = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "concat"]['metrics.test_auc_RF_shapley_691_0.1']
+
+(sub_shapley_mean.mean(), sub_shapley_concat.mean())
+
+
+# integrated gradients
+sub_igrad_mean = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "mean"]['metrics.test_auc_RF_igrads_691_0.1']
+sub_igrad_concat = run_df_multiclass[run_df_multiclass['params.combine_fn'] == "concat"]['metrics.test_auc_RF_igrads_691_0.1']
+
+(sub_igrad_mean.mean(), sub_igrad_concat.mean())
+
+```
+
+## Recompute Predicted Values for Models
+
+```{python}
+def reload_eval(run_id):
+    run = mlflow.get_run(run_id)
+    params = run.data.params
+
+    datapaths = [os.path.join(params['data_dir'], f) for f in eval(params['test_data_paths'])]
+    datas = [pd.read_csv(f) for f in datapaths]
+
+    test_x = []
+
+    for d in datas:
+        X = d.set_index("SampleID").drop("y", axis = 1)
+        X = X - X.median().median()
+        test_x.append(X)
+
+    for i, path in enumerate(eval(params['fdata_paths'])):
+        path = os.path.join(params['data_dir'], path)
+
+        if os.path.splitext(path)[1] == '.csv':
+            fdata = pd.read_csv(path)
+        else:
+            raise ValueError("Unknown file type: {}, must be one of [.csv]".format(path))
+
+        test_time = fdata[fdata.in_train == 0]['Time']
+        test_time.index = fdata[fdata.in_train == 0]['SampleID']
+        test_x[i]['Time'] = test_time
+
+    test_y = d['y']
+
+    ytest_gt = test_y.astype('category').cat.codes
+    ytest_gt = torch.tensor(ytest_gt.values, dtype=torch.int64)
+    cat_names = test_y.astype('category').cat.categories
+
+    tensors = [torch.tensor(d.values,dtype=torch.float32) for d in test_x]
+
+    hidden_sizes = eval(params['hidden_sizes'])
+
+    joint_model = make_joint_model(
+        datas = tensors,
+        prediction_dim = test_y.nunique(),
+        hidden_sizes = hidden_sizes,
+        hidden_dim = int(params['hidden_dim']),
+        activation_fn = torch.tanh,
+        combine_fn = params['combine_fn'],
+        dropout = float(params['dropout'])
+    )
+    
+    artifacts_base_path, all_artifacts = get_run_artifacts(run_id)
+    pt_path = os.path.join(artifacts_base_path, 'final_model.pt')
+
+    try:
+        joint_model.load_state_dict(torch.load(pt_path))
+    except:
+        return None, None, None
+
+    return joint_model, test_y, tensors
+
+```
+
+```{python}
+concat_exp = mlflow.get_experiment_by_name("icl-multiclass")
+run_df_multiclass = mlflow.search_runs([concat_exp.experiment_id])
+```
+
+```{python}
+run_id = run_df_multiclass.run_id[0]
+
+joint_model, test_y, test_x = reload_eval(run_id)
+
+ytest_gt = test_y.astype('category').cat.codes
+ytest_gt = torch.tensor(ytest_gt.values, dtype=torch.int64)
+cat_names = test_y.astype('category').cat.categories
+```
+
+```{python}
+yhat, _, _, _ = joint_model(*test_x)
+```
+
+### Get the scores for icl-multiclass
+
+```{python}
+
+roc_scores_multiclass = []
+
+for run_id in run_df_multiclass[run_df_multiclass.start_time > pd.Timestamp("2024-9-12 12:30:45", tz="UTC")].run_id:
+    joint_model, test_y, test_x = reload_eval(run_id)
+
+    if joint_model is None:
+        roc_scores_multiclass.append(float('nan'))
+        continue
+
+    ytest_gt = test_y.astype('category').cat.codes
+    ytest_gt = torch.tensor(ytest_gt.values, dtype=torch.int64)
+    cat_names = test_y.astype('category').cat.categories
+    
+    yhat, _, _, _ = joint_model(*test_x)
+    score = roc_auc_score(ytest_gt.numpy(), yhat.detach().numpy(), multi_class = 'ovr')
+    roc_scores_multiclass.append(score)
+```
+
+```{python}
+# log the scores metrics to mlflow
+for i, run_id in enumerate(run_df_multiclass[run_df_multiclass.start_time > pd.Timestamp("2024-9-12 12:30:45", tz="UTC")].run_id):
+    with mlflow.start_run(run_id = run_id):
+        mlflow.log_metric("roc_auc", roc_scores_multiclass[i])
+```
+
+### Do the same for the binary data
+```{python}
+concat_exp = mlflow.get_experiment_by_name("icl-binary")
+run_df_binary = mlflow.search_runs([concat_exp.experiment_id])
+```
+
+```{python}
+roc_scores_binary = []
+
+for run_id in run_df_binary.run_id:
+    joint_model, test_y, test_x = reload_eval(run_id)
+
+    if joint_model is None:
+        roc_scores_binary.append(float('nan'))
+        continue
+
+    ytest_gt = test_y.astype('category').cat.codes
+    ytest_gt = torch.tensor(ytest_gt.values, dtype=torch.int64)
+    cat_names = test_y.astype('category').cat.categories
+
+    with torch.inference_mode():
+        yhat, _, _, _ = joint_model(*test_x)
+    score = roc_auc_score(ytest_gt.numpy(), yhat.detach().numpy()[:,1])
+    roc_scores_binary.append(score)
+```
+
+```{python}
+# log the scores metrics to mlflow
+for i, run_id in enumerate(run_df_binary.run_id):
+    with mlflow.start_run(run_id = run_id):
+        mlflow.log_metric("roc_auc", roc_scores_binary[i])
+```
+
+```{python}
+roc_scores_binary = []
+
+for run_id in run_df_binary[run_df_binary.start_time > pd.Timestamp("2024-9-12 12:30:45", tz="UTC")].run_id:
+    joint_model, test_y, test_x = reload_eval(run_id)
+
+    if joint_model is None:
+        roc_scores_binary.append(float('nan'))
+        continue
+
+    ytest_gt = test_y.astype('category').cat.codes
+    ytest_gt = torch.tensor(ytest_gt.values, dtype=torch.int64)
+    cat_names = test_y.astype('category').cat.categories
+
+    with torch.inference_mode():
+        yhat, _, _, _ = joint_model(*test_x)
+    score = roc_auc_score(ytest_gt.numpy(), yhat.detach().numpy()[:,1])
+    roc_scores_binary.append(score)
+
+for score, id in zip(roc_scores_binary, run_df_binary[run_df_binary.start_time > pd.Timestamp("2024-9-12 12:30:45", tz="UTC")].run_id):
+    with mlflow.start_run(run_id = id):
+        mlflow.log_metric("roc_auc", score)
+
+```
+
+#### Fixing previous runs that were tagged as mean when they were in fact concat
+```{python}
+# filter the Timestamp objects in run_df_binary.start_time
+for i, row in run_df_binary[run_df_binary.start_time < pd.Timestamp("2024-9-12 12:30:45", tz="UTC")].iterrows():
+    run_id = row.run_id
+    artifact_uri = row.artifact_uri
+    param_uri = re.sub("artifacts$", "params", artifact_uri)
+    param_uri = re.sub("file://", "", param_uri)
+
+    combine_param = os.path.join(param_uri, "combine_fn")
+
+    if os.path.exists(combine_param):
+        # overwrite the file with a single 'concat' line:
+        with open(combine_param, "w") as f:
+            f.write("concat")
+```
+
+# Tau v Noise Plots
+
+```{python}
+# noise experiments shap vs igrads on ICL102
+
+noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments")
+
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+
+# run that started with [64, 64], [128,128]
+run_df = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+# run that started with [64, 64], [512, 512]
+run_df = run_df[run_df.start_time < pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+# run that started with [128, 128], [256, 256]
+run_df = run_df[(run_df['params.dataset_1'] == 'metab') & (run_df['params.dataset_2'] == 'lip')]
+run_df = run_df.iloc[:10]
+
+# run with high dropout
+run_df = run_df[run_df['params.dropout'] == '0.5']
+
+# Jan 15, 2025, runs for VAE model, you could probably also do this by inspecting which had null igrad scores
+run_df = run_df.iloc[:10,:]
+
+run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+# arrange by layer_sizes and n_noise
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+
+
+mlflow_client = mlflow.MlflowClient()
+# mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
+
+"""
+Need to construct:
+- Igrads separated by static and dynamic architecture
+- Shapley separated by static and dynamic architecture
+"""
+
+# sort this stupid dataframe
+layer_x_noise = [eval(el) for el in run_df['params.layer_x_noise']]
+run_df['n_noise'] = [el['n_noise'] for el in layer_x_noise]
+run_df['layer_sizes'] = [str(el['layer_sizes']) for el in layer_x_noise]
+
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+# move the last 2 rows to the top
+run_df = pd.concat([run_df.iloc[-2:], run_df.iloc[:-2]])
+
+# igrad_random_static = []
+# igrad_random_dynamic = []
+
+# igrad_static = []
+# igrad_dynamic = []
+
+# shap_random_static = []
+# shap_random_dynamic = []
+
+# shap_static = []
+# shap_dynamic = []
+
+all_taus = []
+exploded_noise_levels = []
+exploded_method = []
+exploded_dvs = []
+
+# i = 2
+# row = run_df.iloc[i]
+
+for i, (j, row) in enumerate(run_df.iterrows()):
+    # i = 0
+    # row = run_df.iloc[i]
+    # print(i)
+    # print(row.layer_sizes)
+    layer_x_noise = row['params.layer_x_noise']
+    
+    # igrads
+    # igrad_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_aug")
+    # igrad_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_rand")
+
+    # igrad_orig_v_aug = [el.value for el in igrad_orig_v_aug]
+    # igrad_orig_v_rand = [el.value for el in igrad_orig_v_rand]
+
+
+    # all_taus.extend(igrad_orig_v_aug)
+    # exploded_noise_levels.extend([row.n_noise] * len(igrad_orig_v_aug))
+    # all_taus.extend(igrad_orig_v_rand)
+    # exploded_noise_levels.extend([0] * len(igrad_orig_v_rand))
+    # exploded_method.extend(['igrad'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+    # if i < 5:
+    #     exploded_dvs.extend(['static'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+    # else:
+    #     exploded_dvs.extend(['dynamic'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+    
+    # shap
+    shap_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_aug")
+    shap_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_rand")
+
+    shap_orig_v_aug = [el.value for el in shap_orig_v_aug]
+    shap_orig_v_rand = [el.value for el in shap_orig_v_rand]
+
+    all_taus.extend(shap_orig_v_aug)
+    exploded_noise_levels.extend([row.n_noise] * len(shap_orig_v_aug))
+    all_taus.extend(shap_orig_v_rand)
+    exploded_noise_levels.extend([0] * len(shap_orig_v_rand))
+    exploded_method.extend(['shap'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+    if i < 5:
+        exploded_dvs.extend(['static'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+    else:
+        exploded_dvs.extend(['dynamic'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+plot_df = pd.DataFrame({
+    'tau': all_taus,
+    'n_noise': exploded_noise_levels,
+    'method': exploded_method,
+    'dv': exploded_dvs
+})
+
+####
+fig, axs = plt.subplots(1,2,figsize=(12,8), sharey=True)
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0], legend=False)
+sns.boxplot(data = plot_df[plot_df['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1], legend = False)
+
+axs[0].set_xlabel(None)
+axs[0].set_ylabel(None)
+axs[1].set_xlabel(None)
+
+# set common xlabel
+fig.supxlabel("Number of Noise Features")
+fig.supylabel("Kendall's Tau")
+fig.tight_layout()
+
+
+fig.savefig("output/layer_size_experiments/images/tau_noise_igrads_v_shap_large.png")
+
+#### 
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df[plot_df['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = ax)
+ax.set_xlabel("N")
+
+
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+
+all_igrad_tau.insert(0, igrad_random_taus)
+all_shap_tau.insert(0, shap_random_taus)
+    
+# dynamic plot df
+taus = shap_random_dynamic + shap_dynamic + igrad_random_dynamic + igrad_dynamic
+methods = ['shapley']*(len(shap_dynamic) + len(shap_random_dynamic)) + ['igrads']*(len(igrad_dynamic) + len(igrad_random_dynamic))
+noise_levels_long = [nl for t, nl in zip(taus, n_noise_levels) for el in t]
+
+n_noise_levels = [0, 100, 500, 1000, 2500, 4000]
+
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = all_igrad_tau, ax = ax, color = 'skyblue')
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+fig, ax = plt.subplots()
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+ax.set_xticklabels(n_noise_levels)
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+
+# repeat n_noise for each run
+noise_levels_long = [nl for t, nl in zip(all_igrad_tau, n_noise_levels) for el in t]
+noise_levels_long = noise_levels_long * 2
+
+# flatten all_shap_tau
+all_shap_tau_flat = [el for sublist in all_shap_tau for el in sublist]
+all_igrad_tau_flat = [el for sublist in all_igrad_tau for el in sublist]
+
+# make grouped boxplot with two boxplots, one shapley and one igrad per noise level:
+plot_df = pd.DataFrame({
+    'tau': all_shap_tau_flat + all_igrad_tau_flat,
+    'n_noise': noise_levels_long,
+    'method': ['shapley']*len(all_shap_tau_flat) + ['igrads']*len(all_igrad_tau_flat)
+})
+
+
+
+fig, ax = plt.subplots()
+
+sns.boxplot(data = plot_df, x = 'n_noise', y = 'tau', hue = 'method', ax = ax)
+
+ax.set_xlabel('Number of Noise Features')
+ax.set_ylabel('Weighted Tau')
+```

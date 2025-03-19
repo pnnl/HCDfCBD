@@ -1,0 +1,810 @@
+---
+title: Variable Importance
+jupyter: dataharm
+---
+
+This notebook has the code to retrieve run information from mlflow and make plots:
+- Boxplots of Kendall's Tau vs Noise
+- The violin plots of top and bottom features
+- Density plots of the importance of biomolecules
+
+It is meant to be run interactively, like a jupyter notebook, not processed into a document.
+
+```{python}
+import sys
+sys.path.append('../')
+```
+
+```{python}
+from sklearn.linear_model import LinearRegression
+
+import numpy as np
+import pandas as pd
+import pickle
+import re
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import mlflow
+```
+
+```{python}
+#| label:  helper functions
+def get_run_artifacts(run_id):
+    artifact_uri = mlflow.get_run(run_id).info.artifact_uri
+    artifact_base_path = re.sub("^file://", "", artifact_uri)
+    all_artifacts = mlflow.artifacts.list_artifacts(run_id=run_id)
+    return artifact_base_path, all_artifacts
+
+def create_plot_df(all_ranks, idx, method = "Static"):
+    plot_ranks = []
+    plot_noise = []
+    plot_method = []
+
+    for nl in [100, 500, 1000, 2500, 4000]:
+        ranks = np.stack(all_ranks[nl], axis=0)[:,idx]
+        plot_ranks.extend(ranks)
+        plot_noise.extend([nl] * len(ranks))
+        plot_method.extend([method] * len(ranks))
+
+    return pd.DataFrame(
+        {
+            "Noise Level": plot_noise,
+            "Rank": plot_ranks,
+            "Method": plot_method,
+            "Biomolecule": [idx] * len(plot_ranks)
+        }
+    )
+```
+
+# Select a set of runs from a particular experiment.
+After our mlflow runs have finished we want to select then from their respective experiment.  We may have previously logged other runs in the same experiment, so we need to pluck them out if this is the case.  This can be done via knowledge about the hyperparameters used, or the date range the experiment was run.
+
+```{python}
+#| tags: [parameters]
+
+experiment_name = "noise-layer-experiments"
+```
+
+```{python}
+# noise experiments with shap on ICL102
+noise_exp = mlflow.get_experiment_by_name(experiment_name)
+# noise_exp = mlflow.get_experiment_by_name("noise-exp-3view-binary")
+
+# useful to sort by start time usually
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+run_df = run_df.sort_values(by = ['start_time'])
+```
+
+```{python}
+# Some examples of subsetting down to runs in a particular experiment.  More ideally each set of runs you want to analyze would be in its own experiment.
+# These examples are code that I used on my local system, and will not necessarily work 
+
+### Run that started with [64, 64], [128,128] using metabolomics and proteomics
+run_df = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+run_df = run_df.sort_values(by = ['start_time'])
+run_df = run_df.iloc[:10,:]
+###
+
+### Run that started with [64, 64], [512, 512] using metabolomics and proteomics
+run_df = run_df[run_df.start_time < pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+###
+
+### run that started with [128, 128], [256, 256] and had lipids and metabolites (NOTE:  This used an old parameter setup where we had a 'dataset_1' and 'dataset_2' field)
+run_df = run_df[(run_df['params.dataset_1'] == 'metab') & (run_df['params.dataset_2'] == 'lip')]
+###
+
+### Runs with high dropout
+run_df = run_df[run_df['params.dropout'] == '0.5']
+###
+
+### runs with l1 regularization
+noise_exp = mlflow.get_experiment_by_name("noise-layer-experiments-l1")
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+###
+
+### VAE run, filter to non-null in params.z_dim
+run_df = run_df[run_df['params.z_dim'].notnull()].iloc[:10]
+###
+
+##### Post-process the dataframe ######
+# It is convenient to order these for later
+run_df['n_noise'] = run_df['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df['layer_sizes'] = run_df['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+# arrange by layer_sizes and n_noise
+run_df = run_df.sort_values(by=['layer_sizes', 'n_noise'])
+
+mlflow_client = mlflow.MlflowClient()
+# mlflow_client.get_metric_history(run_id = run_df['run_id'][0], key = 'shap_tau_aug_rand')
+
+"""
+Need to construct:
+- Igrads separated by static and dynamic architecture
+- Shapley separated by static and dynamic architecture
+"""
+```
+
+```{python}
+# get all the shapley values
+all_results = {}
+
+# for each experiment, we will get 10 shap values arrays
+# average across samples for each, and get their ranks
+# move to the next experiment (noise level), probably want to also assign keys based on noise level here ...
+# See for feature index j or whatever, what is the direction, variance, histogram of ranks for that feature.
+# Do the lipids/peptides exhibit specific behaviors?  e.g. all peptides tend to go down/up in rank.
+
+for rid in run_df.run_id:
+    artifacts_base_path, artifacts = get_run_artifacts(rid)
+    all_results[rid] = pickle.load(open(os.path.join(artifacts_base_path, artifacts[0].path), "rb"))
+```
+
+```{python}
+## Here we assemble dataframes for making the variance violin plots and tau-v-noise boxplots
+
+# go through the run_df run_ids since we pre-arranged them
+
+############
+## Static ##
+############
+
+# for the regression of ranks on noise plots
+all_sv_static = []
+
+# for the violin/boxplots
+orig_scores_static = []
+all_ranks_static = {}
+all_ranks_static_noise = {}
+
+# the first 5 rows are the static rows based on our sorting
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+
+        # get the shap scores for the augmented view, takes the sample mean of an N x n_feats matrix
+        sv1 = np.abs(sv[0][0][:,:n_feats]).mean(axis=0)
+
+        # the rest of the features not augmented
+        sv2 = np.concatenate([np.abs(sv_rest).mean(axis=0) for sv_rest in sv[0][1:]])
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = tmp_sv + cat_sv if tmp_sv is not None else cat_sv
+
+        sv_ranks = np.argsort(np.argsort(cat_sv))
+
+        sv_abs_noise = np.abs(sv[0][0]).mean(axis = 0)
+        sv_ranks_noise = np.argsort(np.argsort(sv_abs_noise))
+
+        all_ranks_static.setdefault(row.n_noise, []).append(sv_ranks)
+        all_ranks_static_noise.setdefault(row.n_noise, []).append(sv_ranks_noise)
+
+    for res in all_results[rid]['shap_values_orig']:
+        sv_cat_mean_orig = np.concatenate([
+            np.mean(np.abs(res[0][0]), axis = 0), 
+            np.concatenate([np.abs(sv_rest).mean(axis=0) for sv_rest in res[0][1:]])
+        ])
+        sv_ranks_orig = np.argsort(np.argsort(sv_cat_mean_orig))
+
+        orig_scores_static.append(sv_ranks_orig)
+
+    tmp_sv /= len(all_results[rid]['shap_values_aug'])
+    all_sv_static.append(tmp_sv)
+
+median_ranks_static = np.median(orig_scores_static, axis = 0).argsort()
+
+#sns.scatterplot(x = range(2266), y= coefs_static[:,0])
+
+###################
+##### Dynamic #####
+###################
+
+all_sv_dynamic = []
+orig_scores_dynamic = []
+all_ranks_dynamic = {}
+all_ranks_dynamic_noise = {}
+
+# last 5 rows are the dynamic layer size runs, based on our sorting
+for idx, row in run_df.iloc[5:,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate first and second, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]).mean(axis=0)
+
+        # the rest of the features not augmented
+        sv2 = np.concatenate([np.abs(sv_rest).mean(axis=0) for sv_rest in sv[0][1:]])
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = tmp_sv + cat_sv if tmp_sv is not None else cat_sv
+
+        # get ze ranks
+        sv_ranks = np.argsort(np.argsort(cat_sv))
+
+        sv_abs_noise = np.abs(sv[0][0]).mean(axis = 0)
+        sv_ranks_noise = np.argsort(np.argsort(sv_abs_noise))
+
+        all_ranks_dynamic.setdefault(row.n_noise, []).append(sv_ranks)
+        all_ranks_dynamic_noise.setdefault(row.n_noise, []).append(sv_ranks_noise)
+
+    for res in all_results[rid]['shap_values_orig']:
+        sv_cat_mean_orig = np.concatenate([
+            np.mean(np.abs(res[0][0]), axis = 0), 
+            np.concatenate([np.abs(sv_rest).mean(axis=0) for sv_rest in res[0][1:]])
+        ])
+        sv_ranks_orig = np.argsort(np.argsort(sv_cat_mean_orig))
+
+        orig_scores_dynamic.append(sv_ranks_orig)
+
+    tmp_sv /= 10
+    all_sv_dynamic.append(tmp_sv)
+
+median_ranks_dynamic = np.median(orig_scores_dynamic, axis = 0).argsort()
+```
+
+# Violin Plots
+
+We create violin plots of the ranks based on shapley values for the top and bottom ranked biomolecules as determined by median rank in the no-noise setting.
+```{python}
+top_ranks_static = median_ranks_static[:8]
+bottom_ranks_static = median_ranks_static[-8:]
+
+top_ranks_dynamic = median_ranks_dynamic[:8]
+bottom_ranks_dynamic = median_ranks_dynamic[-8:]
+
+# check out the guys in the middle
+middle_ranks_static = median_ranks_static[len(median_ranks_static)//2-4:len(median_ranks_static)//2+4]
+middle_ranks_dynamic = median_ranks_dynamic[len(median_ranks_dynamic)//2-4:len(median_ranks_dynamic)//2+4]
+
+all_dfs_static = []
+
+for r in range(len(median_ranks_static)):
+    df_static = create_plot_df(all_ranks_static, r, "Static")
+    all_dfs_static.append(df_static)
+
+full_plot_df_static = pd.concat(all_dfs_static)
+```
+
+
+```{python}
+########################
+# plot multiple static #
+########################
+
+fig, ax = plt.subplots(2, 8, figsize = (20, 10), sharey = True)
+
+for i, r in enumerate(top_ranks_static):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_static[full_plot_df_static['Biomolecule'] == r], ax = ax[0,i], inner = None, cut=0)
+    ax[0,i].set_xlabel(None)
+    ax[0,i].set_ylabel(None)
+    #  rotate the x-axis ticks
+    ax[0,i].set_xticklabels(ax[0,i].get_xticklabels(), rotation=45)
+
+for i, r in enumerate(bottom_ranks_static):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_static[full_plot_df_static['Biomolecule'] == r], ax = ax[1,i], inner = None, cut=0)
+    ax[1,i].set_xlabel(None)
+    ax[1,i].set_ylabel(None)
+    #  rotate the x-axis ticks
+    ax[1,i].set_xticklabels(ax[1,i].get_xticklabels(), rotation=45)
+
+
+fig.supxlabel("Number of Noise Features", fontsize = 20)
+
+fig.supylabel("Rank", fontsize = 20, x = 0.01)
+fig.tight_layout()
+
+#########################
+# plot multiple dynamic #
+#########################
+
+all_dfs_dynamic = []
+
+for r in range(len(median_ranks_dynamic)):
+    df_dynamic = create_plot_df(all_ranks_dynamic, r, "Dynamic")
+    all_dfs_dynamic.append(df_dynamic)
+
+full_plot_df_dynamic = pd.concat(all_dfs_dynamic)
+
+# plot multiple dynamic
+fig, ax = plt.subplots(2, 8, figsize = (20, 10), sharey = True)
+
+for i, r in enumerate(top_ranks_dynamic):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_dynamic[full_plot_df_dynamic['Biomolecule'] == r], ax = ax[0,i], inner = None, cut=0)
+    ax[0,i].set_xlabel(None)
+    ax[0,i].set_ylabel(None)
+    ax[0,i].tick_params(axis='x', rotation=45)
+
+for i, r in enumerate(bottom_ranks_dynamic):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_dynamic[full_plot_df_dynamic['Biomolecule'] == r], ax = ax[1,i], inner = None, cut=0)
+    ax[1,i].set_xlabel(None)
+    ax[1,i].set_ylabel(None)
+    ax[1,i].tick_params(axis='x', rotation=45)
+
+fig.supxlabel("Number of Noise Features", fontsize = 20)
+fig.supylabel("Rank", x = 0.01, fontsize = 20)
+fig.tight_layout()
+
+###############################
+# plot the 'meh' biomolecules #
+###############################
+
+fig, ax = plt.subplots(2, 8, figsize = (20, 10), sharey = True)
+
+for i, r in enumerate(middle_ranks_static):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_static[full_plot_df_static['Biomolecule'] == r], ax = ax[0,i], inner = None, cut=0)
+    ax[0,i].set_xlabel(None)
+    ax[0,i].set_ylabel(None)
+    ax[0,i].tick_params(axis='x', rotation=45)
+
+for i, r in enumerate(middle_ranks_dynamic):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_dynamic[full_plot_df_dynamic['Biomolecule'] == r], ax = ax[1,i], inner = None, cut=0)
+    ax[1,i].set_xlabel(None)
+    ax[1,i].set_ylabel(None)
+    ax[1,i].tick_params(axis='x', rotation=45)
+
+fig.supxlabel("Number of Noise Features", fontsize = 20)
+fig.supylabel("Rank", x = 0.01, fontsize = 20)
+fig.tight_layout()
+
+##############
+# split plot #
+##############
+
+combined_df = pd.concat([full_plot_df_static, full_plot_df_dynamic])
+fig, ax = plt.subplots(2, 8, figsize = (20, 10), sharey = True)
+
+for i, r in enumerate(top_ranks_static):
+    sns.violinplot(
+        x = "Noise Level", y = "Rank", hue = "Method",
+        data = combined_df[combined_df['Biomolecule'] == r], 
+        ax = ax[0,i], 
+        inner = None, 
+        cut=0,
+        split=True
+    )
+
+for i, r in enumerate(top_ranks_dynamic):
+    sns.violinplot(
+        x = "Noise Level", y = "Rank", hue = "Method",
+        data = combined_df[combined_df['Biomolecule'] == r], 
+        ax = ax[1,i], 
+        inner = None, 
+        split=True,
+        cut=0
+    )
+
+for i, a in enumerate(ax.flatten()):
+    # a.set_ylim(0, 120)
+    a.set_xlabel(None)
+    a.set_ylabel(None)
+    a.tick_params(axis='x', rotation = 45)
+
+    if i != 0:
+        a.get_legend().remove()
+
+
+fig.supxlabel("Number of Noise Features", fontsize = 20)
+fig.supylabel("Rank", x = 0.01, fontsize = 20)
+fig.tight_layout()
+
+###########################
+# ranks of noise features #
+###########################
+
+all_dfs_noise = []
+
+# get the top ranked noise features for 100 noise features
+ranks_w_noise = np.argsort(np.median(all_ranks_static_noise[100], axis = 0))
+ranks_w_noise = ranks_w_noise[ranks_w_noise >= 120][:16]
+
+for r in ranks_w_noise:
+    df_static = create_plot_df(all_ranks_static_noise, r, "Static")
+    all_dfs_noise.append(df_static)
+
+full_plot_df_noise = pd.concat(all_dfs_noise)
+
+fig, axs = plt.subplots(2, 8, figsize = (20, 10), sharey = True, sharex = True)
+
+for ax, (i, r) in zip(axs.flatten(), enumerate(ranks_w_noise)):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df_noise[full_plot_df_noise['Biomolecule'] == r], ax = ax, inner = None, cut=0)
+
+# set the global ylimit to 0, 120
+for i, a in enumerate(axs.flatten()):
+    # a.set_ylim(0, 120)
+    a.set_xlabel(None)
+    a.set_ylabel(None)
+    a.tick_params(axis='x', rotation = 45)
+
+fig.supxlabel("Number of Noise Features", fontsize = 20)
+fig.supylabel("Rank", x = 0.01, fontsize = 20)
+fig.tight_layout()
+```
+
+# Tau v Noise Boxplots
+```{python}
+# We plot runs from several sweeps here, so we re-select two sets of runs as in the start of this notebook\
+# again, some of the values here are specific to the original inspection of the results (e.g. the date).
+
+run_df = mlflow.search_runs([noise_exp.experiment_id])
+run_df = run_df.sort_values(by = ['start_time'])
+
+# run that started with [64, 64], [128,128]
+run_df_sm = run_df[run_df.start_time > pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+run_df_sm = run_df_sm.sort_values(by = ['start_time'])
+run_df_sm = run_df_sm.iloc[:10,:]
+
+run_df_sm['n_noise'] = run_df_sm['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df_sm['layer_sizes'] = run_df_sm['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+run_df_sm = run_df_sm.sort_values(by=['layer_sizes', 'n_noise'])
+
+# run that started with [64, 64], [512, 512]
+run_df_lg = run_df[run_df.start_time < pd.Timestamp("2024-11-4 12:30:45", tz="UTC")]
+
+run_df_lg['n_noise'] = run_df_lg['params.layer_x_noise'].apply(lambda x: eval(x)['n_noise'])
+run_df_lg['layer_sizes'] = run_df_lg['params.layer_x_noise'].apply(lambda x: sum(eval(x)['layer_sizes'][0]))
+
+run_df_lg = run_df_lg.sort_values(by=['layer_sizes', 'n_noise'])
+
+def get_tau_v_noise_df(run_df, mlflow_client):
+    all_taus = []
+    exploded_noise_levels = []
+    exploded_method = []
+    exploded_dvs = []
+
+    for i, (j, row) in enumerate(run_df.iterrows()):
+        # i = 0
+        # row = run_df.iloc[i]
+        # print(i)
+        # print(row.layer_sizes)
+        layer_x_noise = row['params.layer_x_noise']
+        
+        ## DEPRECATED:  PLOTS FOR INTEGRATED GRADIENTS
+        # igrad_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_aug")
+        # igrad_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "igrad_tau_orig_rand")
+
+        # igrad_orig_v_aug = [el.value for el in igrad_orig_v_aug]
+        # igrad_orig_v_rand = [el.value for el in igrad_orig_v_rand]
+
+
+        # all_taus.extend(igrad_orig_v_aug)
+        # exploded_noise_levels.extend([row.n_noise] * len(igrad_orig_v_aug))
+        # all_taus.extend(igrad_orig_v_rand)
+        # exploded_noise_levels.extend([0] * len(igrad_orig_v_rand))
+        # exploded_method.extend(['igrad'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+        # if i < 5:
+        #     exploded_dvs.extend(['static'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+        # else:
+        #     exploded_dvs.extend(['dynamic'] * (len(igrad_orig_v_aug) + len(igrad_orig_v_rand)))
+
+        # SHAP
+        shap_orig_v_aug = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_aug")
+        shap_orig_v_rand = mlflow_client.get_metric_history(row.run_id, key = "shap_tau_orig_rand")
+
+        shap_orig_v_aug = [el.value for el in shap_orig_v_aug]
+        shap_orig_v_rand = [el.value for el in shap_orig_v_rand]
+
+        all_taus.extend(shap_orig_v_aug)
+        exploded_noise_levels.extend([row.n_noise] * len(shap_orig_v_aug))
+        all_taus.extend(shap_orig_v_rand)
+        exploded_noise_levels.extend([0] * len(shap_orig_v_rand))
+        exploded_method.extend(['shap'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+        if i < 5:
+            exploded_dvs.extend(['static'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+        else:
+            exploded_dvs.extend(['dynamic'] * (len(shap_orig_v_aug) + len(shap_orig_v_rand)))
+
+
+    plot_df = pd.DataFrame({
+        'tau': all_taus,
+        'n_noise': exploded_noise_levels,
+        'method': exploded_method,
+        'dv': exploded_dvs
+    })
+
+    return(plot_df)
+
+plot_df_sm = get_tau_v_noise_df(run_df_sm, mlflow_client)
+plot_df_lg = get_tau_v_noise_df(run_df_lg, mlflow_client)
+
+plot_df_sm['settings'] = plot_df_sm['dv'] + "-128"
+plot_df_lg['settings'] = plot_df_lg['dv'] + "-512"
+
+full_plot_df = pd.concat([plot_df_sm, plot_df_lg])
+```
+
+```{python}
+### combined boxplots ###
+fig, ax = plt.subplots(figsize = (12,12))
+
+sns.boxplot(data = full_plot_df, x = 'n_noise', y = 'tau', hue = 'settings', ax = ax)
+
+ax.set_xlabel("Number of Noise Features")
+ax.set_ylabel("Kenall's Tau")
+
+# fig.savefig("output/layer_size_experiments/images/tau_noise_shap_only_inverse_pattern_single.png", dpi = 300)
+
+#### 4x4 ###
+fig, axs = plt.subplots(2,2,figsize=(16,12), sharey=True)
+
+# sns.boxplot(data = all_shap_tau, ax = ax, color = 'skyblue')
+sns.boxplot(data = plot_df_sm[plot_df_sm['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0,0], legend=False)
+sns.boxplot(data = plot_df_sm[plot_df_sm['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[0,1], legend=False)
+
+sns.boxplot(data = plot_df_lg[plot_df_lg['dv'] == 'static'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1,0], legend=False)
+sns.boxplot(data = plot_df_lg[plot_df_lg['dv'] == 'dynamic'], x = 'n_noise', y = 'tau', hue = 'method', ax = axs[1,1], legend = False)
+
+# remove x and y axis subplot labels
+for ax in axs.flatten():
+    ax.set_xlabel(None)
+    ax.set_ylabel(None)
+
+# set common xlabel
+fig.supxlabel("Number of Noise Features")
+fig.supylabel("Kendall's Tau")
+fig.tight_layout()
+
+fig.savefig("output/layer_size_experiments/images/tau_noise_shap_only_inverse_pattern.png")
+```
+
+```{python}
+#############################
+# More violin plot examples #
+#############################
+
+fig, ax = plt.subplots()
+
+sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df[full_plot_df['Biomolecule'] == 32], ax = ax, inner = None)
+
+fig, ax = plt.subplots()
+
+sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df[full_plot_df['Biomolecule'] == 24], ax = ax, inner = None)
+
+# plot multiple
+fig, ax = plt.subplots(2, 8, figsize = (20, 10), sharex = True, sharey = True)
+
+for i, r in enumerate(top_ranks):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df[full_plot_df['Biomolecule'] == r], ax = ax[0,i], inner = None, cut=0)
+    ax[0,i].set_xlabel(None)
+    ax[0,i].set_ylabel(None)
+for i, r in enumerate(bottom_ranks):
+    sns.violinplot(x = "Noise Level", y = "Rank", data = full_plot_df[full_plot_df['Biomolecule'] == r], ax = ax[1,i], inner = None, cut=0)
+    ax[1,i].set_xlabel(None)
+    ax[1,i].set_ylabel(None)
+
+plot_ranks = []
+plot_noise = []
+
+for nl in [100, 500, 1000, 2500, 4000]:
+    ranks = np.concatenate(all_ranks_static[nl], axis=0)[:,11]
+    plot_ranks.extend(ranks)
+    plot_noise.extend([nl] * len(ranks))
+
+plot_method = ["Static"] * len(plot_noise)
+
+for nl in [100, 500, 1000, 2500, 4000]:
+    ranks = np.concatenate(all_ranks_dynamic[nl], axis=0)[:,11]
+    plot_ranks.extend(ranks)
+    plot_noise.extend([nl] * len(ranks))
+    plot_method.extend(["Dynamic"] * len(ranks))
+
+plot_df_mm = pd.DataFrame(
+    {
+        "Noise Level": plot_noise,
+        "Rank": plot_ranks,
+        "Method": plot_method
+    }
+)
+
+sns.violinplot(x = "Noise Level", y = "Rank", hue = "Method", split = True, data = plot_df_mm, ax = ax, inner = None)
+```
+
+```{python}
+###############################################
+### 'Regression' on each metabolite's ranks ###
+###############################################
+
+Y_static = np.stack(all_sv_static)
+Y_static_ranks = np.argsort(np.argsort(Y_static, axis = 1), axis = 1)
+X = np.array([100, 500, 1000, 2500, 4000])[:,None]
+
+lr = LinearRegression()
+lr.fit(X, Y_static_ranks)
+
+coefs_static = lr.coef_
+
+Y_dynamic = np.stack(all_sv_dynamic)
+Y_dynamic_ranks = np.argsort(np.argsort(Y_dynamic, axis = 1), axis = 1)
+
+lr = LinearRegression()
+lr.fit(X, Y_dynamic_ranks)
+
+coefs_dynamic = lr.coef_
+
+plot_df = pd.DataFrame(
+    {
+        "x": list(range(coefs_static.shape[0])) + list(range(coefs_dynamic.shape[0])),
+        "y": np.concatenate([coefs_static[:,0], coefs_dynamic[:,0]]),
+        "hue" : (["metabolites"] * n_feats + ["lipids"] * sv[0][1].shape[1])*2,
+        "layer_mode": ["static"] * coefs_static.shape[0] + ["dynamic"] * coefs_dynamic.shape[0]
+    
+    
+    }
+)
+
+fig, axs = plt.subplots(1,2, figsize = (12,8))
+
+sns.scatterplot(x = "x", y= "y", hue="hue", ax = axs[0], data = plot_df[plot_df.layer_mode == "static"])
+
+axs[0].legend().set_title('')
+axs[0].set_xlabel("")
+axs[0].set_ylabel("")
+
+sns.scatterplot(x = "x", y= "y", hue="hue", ax = axs[1], data = plot_df[plot_df.layer_mode == "dynamic"])
+
+axs[1].legend().remove()
+axs[1].set_xlabel("")
+axs[1].set_ylabel("")
+
+fig.supxlabel("Biomolecule")
+fig.supylabel("Regression Coefficient")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-rank-regression.png", dpi=300)
+```
+
+# Plot the distribution to see whats goin on....
+
+```{python}
+all_sv_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]).reshape(-1)
+        sv2 = np.abs(sv[0][1]).reshape(-1)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = np.concatenate([tmp_sv, cat_sv]) if tmp_sv is not None else cat_sv
+
+    all_sv_density.extend(tmp_sv)
+    noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+density_plot_df = pd.DataFrame(
+    {
+        "shap_val": all_sv_density,
+        "Noise Level": noise_vec
+    }
+)
+
+fig, ax = plt.subplots()
+
+# make a density plot
+sns.kdeplot(
+    x = "shap_val", 
+    hue = "Noise Level", 
+    data = density_plot_df[density_plot_df.shap_val < np.quantile(density_plot_df.shap_val, 0.9)], 
+    ax = ax
+)
+
+ax.set_xlabel("Shapley Value")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-shap-density.png", dpi=300)
+```
+
+```{python}
+all_ig_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[5:,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = None
+
+    # concatenate lipids and proteins, average across all
+    # [dataset][target][run]
+    for sv in all_results[rid]['igrads_aug']:
+        n_feats = sv[0]["Cal04"][0].shape[1] - row.n_noise
+
+        sv1 = np.mean(sv[0]["Cal04"], axis = 0)
+        sv2 = np.mean(sv[1]["Cal04"], axis = 0)
+
+        sv1 = np.abs(sv1[:,:n_feats]).reshape(-1)
+        sv2 = np.abs(sv2).reshape(-1)
+
+        cat_sv = np.concatenate([sv1, sv2])
+        tmp_sv = np.concatenate([tmp_sv, cat_sv]) if tmp_sv is not None else cat_sv
+
+    all_ig_density.extend(tmp_sv)
+    noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+density_plot_df = pd.DataFrame(
+    {
+        "ig_val": all_ig_density,
+        "Noise Level": noise_vec
+    }
+)
+
+fig, ax = plt.subplots()
+
+# make a density plot
+sns.kdeplot(
+    x = "ig_val", 
+    hue = "Noise Level", 
+    data = density_plot_df[density_plot_df.ig_val < np.quantile(density_plot_df.ig_val, 0.9)], 
+    ax = ax
+)
+
+ax.set_xlabel("IGrad Value")
+fig.tight_layout()
+```
+
+```{python}
+fig.savefig("output/layer_size_experiments/images/128-256-metab-lip-dropout-igrad-density.png", dpi=300)
+```
+
+```{python}
+# for each feature, what is the variance of it's rank vs it's average rank -> scatterplot
+all_sv_density = []
+noise_vec = []
+
+for idx, row in run_df.iloc[:5,].iterrows():
+    rid = row.run_id
+    print(rid)
+    tmp_sv = []
+
+    # concatenate lipids and proteins, average across all
+    for sv in all_results[rid]['shap_values_aug']:
+        n_feats = sv[0][0].shape[1] - row.n_noise
+        sv1 = np.abs(sv[0][0][:,:n_feats]) # N x p1
+        sv2 = np.abs(sv[0][1]) # N x p2
+
+        tmp_sv.append(sv1)
+
+    tmp_sv = np.stack(tmp_sv)
+    all_sv_density.append(tmp_sv)
+
+all_sv_density = np.concatenate(all_sv_density, axis = 0)
+
+all_sv_mean = np.concatenate(all_sv_density, axis = 0).mean(axis = 0)
+all_sv_std = np.concatenate(all_sv_density, axis = 0).std(axis = 0)
+
+sns.scatterplot(x = all_sv_mean, y = all_sv_std)
+
+# how do the actual -ranks- vary?
+# compute the average of the ranks
+all_sv_ranks = np.argsort(np.argsort(all_sv_density, axis = 2), axis = 2)
+
+sns.scatterplot(x = all_sv_mean, y = all_sv_ranks.std(axis = 0).mean(axis = 1))
+
+# all_sv_density.extend(tmp_sv)
+# noise_vec.extend([row.n_noise]*len(tmp_sv))
+
+# density_plot_df = pd.DataFrame(
+#     {
+#         "shap_val": all_sv_density,
+#         "Noise Level": noise_vec
+#     }
+# )
+```

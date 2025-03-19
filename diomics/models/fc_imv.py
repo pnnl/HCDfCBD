@@ -115,7 +115,7 @@ class JointVAE(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: List[torch.Tensor]):
+    def forward(self, *x: List[torch.Tensor]):
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
 
         dists = []
@@ -172,7 +172,9 @@ class JointVAE(nn.Module):
         # compute the variational loss for each marginal model
         var_losses = [var_loss(y, yhat, dist, **kwargs) for yhat, dist in zip(yhats, dists)]
     
-        return product_loss + sum(var_losses)
+        loss = product_loss + sum(var_losses)
+
+        return product_loss, var_losses, loss
     
 def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None):
     """ Compute the variational loss for a single marginal model
@@ -182,6 +184,9 @@ def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None)
         yhat (torch.Tensor): Prediction probabilities for the labels
         dist (torch.distributions.Normal): The distribution of the latent variable
         var_beta (float, optional): The weight of the KL divergence term. Defaults to 1.
+        focal (bool, optional): Whether to use focal loss. Defaults to True.
+        gamma (float, optional): The focal loss gamma parameter. Defaults to 2.
+        alpha (torch.Tensor, optional): A tensor with number of elements equal to the number of classes, specifying class weights. Defaults to None.
 
     Returns:
         torch.Tensor: The variational loss
@@ -207,3 +212,37 @@ def var_loss(y, yhat, dist, var_beta=1., focal = True, gamma = 2., alpha = None)
     else:
         ce = ce.sum()
         return torch.mean(ce + var_beta * kl)        
+
+def make_joint_vae(datas, prediction_dim, hidden_sizes, z_dim, hidden_dim, dropout=0.2):
+    """
+    Create a joint model for multiple views.  Each view gets its own 'marginal model', and then there is a fusion model that takes the output of each marginal model and combines them.
+
+    Args:
+        datas (List[torch.Tensor]): A list of tensors, each representing a view
+        prediction_dim (int): The number of output classes
+        hidden_sizes (List[List[int]]): A list of hidden sizes for each marginal model
+        z_dim (int): The dimensionality of the latent representation
+        dropout (float): The dropout rate
+        hidden_dim (int): The number of hidden units between fc1 and fc2 of the combination model.
+
+    Returns:
+        JointVAE: The joint model
+    """
+
+    marginal_models = []
+
+    for k in range(len(datas)):
+        input_size = datas[k].shape[1]
+        mmod = FC_Marginal(
+            input_size = input_size, 
+            hidden_sizes = hidden_sizes[k], 
+            z_dim = z_dim,
+            prediction_dim = prediction_dim,
+            dropout = dropout
+        )
+        marginal_models.append(mmod)
+
+    # joint model
+    joint_model = JointVAE(marginal_models=marginal_models, hidden_dim=hidden_dim, dropout = dropout)
+
+    return joint_model

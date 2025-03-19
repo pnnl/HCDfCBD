@@ -20,7 +20,7 @@ class simple_FC(nn.Module):
         fc{j} (nn.Linear): The j-th fully connected layer after the input layer
         fc_out (nn.Linear): The layer that maps the (sampled) latent representation to the output classes
     """
-    def __init__(self, input_size: int, hidden_sizes: List[int], prediction_dim: int, dropout: float = 0.2):
+    def __init__(self, input_size: int, hidden_sizes: List[int], prediction_dim: int, activation_fn = F.relu, dropout: float = 0.2):
         """
         Initialize the FC_Marginal model
 
@@ -28,12 +28,14 @@ class simple_FC(nn.Module):
             input_size (int): The number of input features
             hidden_sizes (List[int]): The number of hidden units in each layer
             prediction_dim (int): The number of output classes
+            activation_fn (torch.nn.functional, optional): The activation function. Defaults to F.relu
             dropout (float, optional): The dropout rate. Defaults to 0.2.
         """
         super().__init__()
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
         self.prediction_dim = prediction_dim
+        self.activation_fn = activation_fn
         
         self.fc1 = nn.Linear(input_size, hidden_sizes[0])
 
@@ -45,10 +47,11 @@ class simple_FC(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        h = F.relu(self.fc1(x))
+        h = self.activation_fn(self.fc1(x))
+        h = self.dropout(h)
 
         for sz in range(1, len(self.hidden_sizes)):
-            h = self.dropout(F.relu(getattr(self, f'fc{sz+1}')(h)))
+            h = self.dropout(self.activation_fn(getattr(self, f'fc{sz+1}')(h)))
         
         preds = self.dropout(self.fc_out(h))
         preds = F.softmax(preds, dim=-1)
@@ -96,12 +99,12 @@ class simple_FC_hook(simple_FC):
         return hook
 
     def forward(self, x):
-        h = self.dropout(F.relu(self.fc1(x)))
+        h = self.dropout(self.activation_fn(self.fc1(x)))
 
         h.register_hook(self.get_activation_grad('fc1'))
 
         for sz in range(1, len(self.hidden_sizes)):
-            h = self.dropout(F.relu(getattr(self, f'fc{sz+1}')(h)))
+            h = self.dropout(self.activation_fn(getattr(self, f'fc{sz+1}')(h)))
         
         preds = self.dropout(self.fc_out(h))
         preds = F.softmax(preds, dim=-1)
@@ -118,7 +121,7 @@ class JointMLP(nn.Module):
         fc2 (nn.Linear): The second fully connected layer, immediately after fc1
         dropout (nn.Dropout): A dropout layer
     """
-    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, dropout: float = 0.2, hooks = False):
+    def __init__(self, marginal_models: List[simple_FC], hidden_dim: int = 128, activation_fn = F.relu, dropout: float = 0.2, combine_fn = "mean", hooks = False):
         """
         Initialize the JointMLP model
 
@@ -129,10 +132,18 @@ class JointMLP(nn.Module):
         """
         super().__init__()
         self.margin_models = torch.nn.ModuleList(marginal_models)
-        assert len(set([m.hidden_sizes[-1] for m in self.margin_models])) == 1, "All models must have the same last hidden size"
-        self.fc1 = nn.Linear(marginal_models[0].hidden_sizes[-1], hidden_dim)
+
+        if combine_fn == 'mean':
+            assert len(set([m.hidden_sizes[-1] for m in self.margin_models])) == 1, "If mean combining, all models must have the same last hidden size"
+            dim_fc1_in = marginal_models[0].hidden_sizes[-1]
+        elif combine_fn == 'concat':
+            dim_fc1_in = sum([m.hidden_sizes[-1] for m in self.margin_models])
+            
+        self.combine_fn = combine_fn
+        self.fc1 = nn.Linear(dim_fc1_in, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, self.margin_models[0].prediction_dim)
         self.dropout = nn.Dropout(dropout)
+        self.activation_fn = activation_fn
         self.hooks = hooks
 
         if self.hooks:
@@ -151,7 +162,7 @@ class JointMLP(nn.Module):
             self.activations_grad[name] = grad
         return hook
 
-    def forward(self, x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
+    def forward(self, *x: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         assert len(x) == len(self.margin_models), "Number of inputs must match number of marginal models"
 
         yhats = []
@@ -172,9 +183,12 @@ class JointMLP(nn.Module):
             yhats.append(yhat)
             hiddens.append(h)
 
-        h = torch.mean(torch.stack(hiddens), dim=0)
+        if self.combine_fn == 'mean':
+            h = torch.mean(torch.stack(hiddens), dim=0)
+        elif self.combine_fn == 'concat':
+            h = torch.cat(hiddens, dim=-1)
 
-        h = self.dropout(F.relu(self.fc1(h)))
+        h = self.dropout(self.activation_fn(self.fc1(h)))
 
         if self.hooks:
             h.register_hook(self.get_activation_grad('fc1'))
@@ -183,14 +197,16 @@ class JointMLP(nn.Module):
 
         return yhat, h, yhats, hiddens
     
-    def loss(self, y, yhat, yhats, focal=True, gamma=2., alpha=None, **kwargs) -> torch.Tensor:
+    def loss(self, y, yhat, yhats, focal=True, gamma=2., alpha=None, marginal_weight=None, marginal_coefs=None) -> torch.Tensor:
         """ Compute the total loss for all the joint and marginal models
 
         Args:
             y (torch.Tensor): Ground truth labels
             yhat (torch.Tensor): softmax predictions for the combinations of experts
             yhats (List[torch.Tensor]): List of softmax predictions for each marginal model
-
+            focal (bool, optional): Whether to use focal loss. Defaults to True.
+            gamma (float, optional): The focal loss gamma parameter. Defaults to 2.
+            alpha (torch.Tensor, optional): A tensor with number of elements equal to the number of classes, specifying class weights. Defaults to None.
         Returns:
             torch.Tensor: The joint loss
         """
@@ -208,9 +224,53 @@ class JointMLP(nn.Module):
             product_loss = torch.pow(1 - yhat.gather(1, y.view(-1, 1)), gamma).view(-1) * product_loss
             marginal_losses = [torch.pow(1 - yh.gather(1, y.view(-1, 1)), gamma).view(-1) * m for yh, m in zip(yhats, marginal_losses)]
         
-        # import pdb; pdb.set_trace()
         product_loss = torch.mean(product_loss)
         marginal_losses = [torch.mean(m) for m in marginal_losses]
 
-        return product_loss, marginal_losses, product_loss + sum(marginal_losses)
-    
+        if marginal_weight is not None:
+            if marginal_coefs is None:
+                marginal_coefs = [1.0] * len(marginal_losses)
+            marginal_losses = [m * l for m,l in zip(marginal_coefs, marginal_losses)]
+
+            avg_marginal_loss = sum(marginal_losses)/len(marginal_losses)
+
+            loss = product_loss + marginal_weight*avg_marginal_loss
+        else:
+            loss = product_loss + sum(marginal_losses)/len(marginal_losses) 
+
+        return product_loss, marginal_losses, loss
+
+def make_joint_model(datas, prediction_dim, hidden_sizes, dropout, hidden_dim, activation_fn=F.relu, combine_fn='concat'):
+    """
+    Create a joint model for multiple views.  Each view gets its own 'marginal model', and then there is a fusion model that takes the output of each marginal model and combines them.
+
+    Args:
+        datas (List[torch.Tensor]): A list of tensors, each representing a view
+        prediction_dim (int): The number of output classes
+        hidden_sizes (List[List[int]]): A list of hidden sizes for each marginal model
+        dropout (float): The dropout rate
+        hidden_dim (int): The number of hidden units between fc1 and fc2 of the combination model.
+        activation_fn (torch.nn.functional): The activation function
+        combine_fn (str, optional): The method to combine the marginal models. Defaults to 'concat'.
+
+    Returns:
+        JointMLP: The joint model
+    """
+
+    marginal_models = []
+
+    for k in range(len(datas)):
+        input_size = datas[k].shape[1]
+        mmod = simple_FC(
+            input_size = input_size, 
+            hidden_sizes = hidden_sizes[k], 
+            prediction_dim = prediction_dim,
+            dropout = dropout,
+            activation_fn = activation_fn
+        )
+        marginal_models.append(mmod)
+
+    # joint model
+    joint_model = JointMLP(marginal_models=marginal_models, hidden_dim=hidden_dim, activation_fn=activation_fn, combine_fn = combine_fn)
+
+    return joint_model

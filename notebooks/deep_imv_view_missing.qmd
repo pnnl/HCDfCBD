@@ -1,0 +1,152 @@
+---
+title: Example training Deep-IMV on a data with a missing view.
+jupyter: python3
+---
+
+```{python}
+import sys
+sys.path.append('../')
+
+import torch
+from torch.optim import AdamW
+
+from diomics.models.fc_imv import FC_Marginal, JointVAE
+from diomics.models.multi_mlp import simple_FC, JointMLP
+
+import numpy as np
+import pandas as pd
+
+from sklearn.metrics import roc_auc_score, confusion_matrix
+```
+
+```{python}
+lip = pd.read_csv("/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/lip_neg/edata.csv")
+metab = pd.read_csv("/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/metab/edata.csv")
+pep = pd.read_csv("/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/pep/edata.csv")
+
+lip.set_index("Lipid", inplace = True)
+metab.set_index("Metabolite", inplace = True)
+pep.set_index("PEPTIDE.EX", inplace = True)
+
+fdata_lip = pd.read_csv('/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/lip_neg/fdata.csv')
+fdata_metab = pd.read_csv('/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/metab/fdata.csv')
+fdata_pep = pd.read_csv('/Volumes/Data_Harmony/data_to_share_with_UI_developers/ICL102/01_omics_elements/pep/fdata.csv')
+
+# metab has zeros instead of NA :( replace them with NA
+metab[metab == 0] = np.nan
+
+# log transform data
+lip = np.log2(lip)
+metab = np.log2(metab)
+pep = np.log2(pep)
+
+# naive imputation
+lip.fillna(lip.mean(), inplace = True)
+metab.fillna(metab.mean(), inplace = True)
+pep.fillna(pep.mean(), inplace = True)
+```
+
+# Example of training with just lipids and metabolites
+
+There are samples that are not present in all datasets, we will make different inputs depending on their view-missing patterns.  For example, if the lipids (fist input) are missing, the input will look like:  `[None, torch.tensor(...)]`.
+
+```{python}
+# find the missing columns in any datasets and fill them with NA's, the function that builds the batches will look for these all NA columns
+
+all_columns = set(lip.columns).union(metab.columns)
+
+lip_diff = set(all_columns).difference(lip.columns)
+lip[list(lip_diff)] = np.nan
+
+metab_diff = set(all_columns).difference(metab.columns)
+metab[list(metab_diff)] = np.nan
+
+# align columns
+lip = lip[metab.columns]
+
+# transform to N x P tensors
+views = [lip, metab]
+views = [torch.tensor(el.values, dtype = torch.float32).T for el in views]
+```
+
+```{python}
+# function that makes dictionaries of inputs of different view-missing patterns
+def build_combo_batches(views, y):
+    num_view_missing = []
+
+    for view in views:
+        na_views = torch.isnan(view).sum(axis = 1) == view.shape[1]
+        num_view_missing.append(na_views)
+
+    which_na = torch.stack(num_view_missing, axis = 1)
+
+    input_dict = {}
+    gt_dict = {}
+
+    for comb in torch.unique(which_na, dim = 0):
+        inds = (which_na == comb.unsqueeze(0)).all(axis = 1)
+        input_batch = [views[i][inds] if not comb[i] else None for i in range(len(views))]
+
+        gt_dict[comb] = y[inds]
+        input_dict[comb] = input_batch
+
+    return input_dict, gt_dict
+```
+
+```{python}
+# construct the input
+
+category_map = {
+    "Mock": 0,
+    "FM": 1,
+    "AH1": 2,
+    "691": 3
+}
+
+# assign classes depending on whether the keys in category map are found in the columns
+y_series = pd.Series([category_map[k] for cname in lip.columns for k in category_map.keys() if k in cname])
+
+y = torch.tensor(y_series.values, dtype = torch.int64)
+
+input_dict, gt_dict = build_combo_batches(views, y)
+
+joint_model = make_joint_vae(views, prediction_dim = y_series.nunique(), hidden_sizes = [[64, 64], [32, 32]], z_dim = 16, hidden_dim=32)
+optimizer = AdamW(joint_model.parameters())
+```
+
+Here we train with the view-missing patterns.  You can also randomly drop a view during training by simply setting it to None in the input list.
+
+```{python}
+for epoch in range(1500):
+    optimizer.zero_grad()
+
+    for comb, x in input_dict.items():
+        y_gt = gt_dict[comb]
+        yhat, poe_dist, yhats, dists = joint_model(x)
+        # pass alpha and gamma to do focal loss
+        loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists)
+
+        print(f"loss for {comb}:  {loss.item()}")
+
+        # accumulate the loss from each view-missing pattern
+        loss.backward()
+
+    torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
+    optimizer.step()
+```
+
+```{python}
+# performance on training set
+all_logits = []
+
+with torch.inference_mode():
+    for k, v in input_dict.items():
+        yhat, _, _, _ = joint_model(v)
+        all_logits.append(yhat)
+
+all_logits = torch.cat(all_logits)
+
+# get auc score:
+auc_score = roc_auc_score(y.numpy(), all_logits.detach().numpy(), multi_class = 'ovr')
+print(auc_score)
+```
