@@ -3,7 +3,12 @@
 _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
 max_batch_size: null
 params:
-  hidden_sizes: "[[128], [128], [128]], [[92, 64], [152, 64], [1105, 64]], [[76, 32], [136, 32], [1089, 32]], [[68, 16], [128, 16], [1081, 16]], [[64, 8], [124, 8], [1077, 8]]"
+  hidden_sizes: "
+    [[128], [128], [128]],\
+    [[92, 64], [152, 64],[1105, 64]],\
+    [[76, 32], [136, 32], [1089, 32]],\
+    [[68, 16], [128, 16], [1081, 16]],\
+    [[64, 8], [124, 8], [1077, 8]]"
   combine_fn: "mean"
   hidden_dim: 64, 32, 16
   data_dir: /Users/clab683/git_repos/DeepIMV/data/ICL104-binary
