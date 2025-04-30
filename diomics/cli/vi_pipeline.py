@@ -165,7 +165,6 @@ def subset_fmeta(fmeta, datas, event, inplace = True) -> pd.DataFrame:
 
 def naive_preprocess(datas, fmeta, event):
     for k in range(len(datas)):
-        datas[k] = datas[k].set_index(event['edata_cnames'][k])
         datas[k][datas[k] == 0] = np.nan
         if not any(datas[k] < 0):
             datas[k] = np.log2(datas[k])
@@ -224,6 +223,12 @@ def run_pipeline(event, context):
 
     fmeta = pd.read_csv(fmeta_path)
     fmeta = fmeta[~fmeta[event['fmeta_sample_names']].isna().any(axis=1)]
+
+    # remove feature id column to get purely numeric arrays, we'll transpose later
+    for k in range(len(datas)):
+        datas[k] = datas[k].set_index(event['edata_cnames'][k])
+
+    out_dict['datas'] = datas
 
     if event['preprocess']:
         fmeta, y = naive_preprocess(datas, fmeta, event)
@@ -371,25 +376,26 @@ def run_pipeline(event, context):
 
     return out_dict
 
-def get_shapley(event, joint_model, datas):
+def get_shapley(event, joint_model, datas, make_plots = False):
     joint_model_wrp = JointMLPWrapper(joint_model)
-
-    # make the explainer object
-    explainer = shap.DeepExplainer(joint_model_wrp, list(datas.values()))
 
     # make tensors of the whole dataset
     all_data_tensors = [torch.tensor(d.values, dtype=torch.float32).T for d in datas]
+
+    # make the explainer object
+    explainer = shap.DeepExplainer(joint_model_wrp, all_data_tensors)
 
     # compute the shapley values
     shap_values = explainer.shap_values(all_data_tensors, check_additivity=False)
 
     # make all the plots and dump them to disk
     # TODO:  I am assuming binary classification, for multi-class we need to loop over the first index as well probably
-    for k, (tmp_tensor, sv, fname) in enumerate(zip(all_data_tensors, shap_values[0], event['edata_filenames'])):
-        fig = plt.gcf()
-        shap.summary_plot(sv, features=tmp_tensor, feature_names=datas[k].index, show=False)
-        fig.savefig(os.path.join(event['output_dir'], 'shap_summary_plot_{}.png'.format(fname)))
-        plt.close(fig)
+    if make_plots:
+        for k, (tmp_tensor, sv, fname) in enumerate(zip(all_data_tensors, shap_values[0], event['edata_filenames'])):
+            fig = plt.gcf()
+            shap.summary_plot(sv, features=tmp_tensor, feature_names=datas[k].index, show=False)
+            fig.savefig(os.path.join(event['output_dir'], 'shap_summary_plot_{}.png'.format(fname)))
+            plt.close(fig)
 
     abs_shap_values = [np.abs(el).sum(axis = 0) for el in shap_values[0]]
     sorted_shap_values = [sorted(el, reverse=True) for el in abs_shap_values]
