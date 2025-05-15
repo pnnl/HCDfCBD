@@ -197,17 +197,17 @@ def handler(event, context):
     y = fmeta[event['fmeta_target_name']]
 
     ## Make sure their fmeta is valid, we should just require this up-front, but I'm fixing it here for now
-    # has_all = pd.Series([True]*fmeta.shape[0])
+    has_all = pd.Series([True]*fmeta.shape[0])
 
-    # for k in range(len(datas)):
-    #     has_all = has_all & fmeta[event['fmeta_sample_names'][k]].isin(datas[k].columns)
+    for k in range(len(datas)):
+        has_all = has_all & fmeta[event['fmeta_sample_names'][k]].isin(datas[k].columns)
 
-    # fmeta = fmeta[has_all]
+    fmeta = fmeta[has_all]
 
-    # for k in range(len(datas)):
-    #     datas[k] = datas[k][fmeta[event['fmeta_sample_names'][k]]]
+    for k in range(len(datas)):
+        datas[k] = datas[k][fmeta[event['fmeta_sample_names'][k]]]
 
-    # y = y[has_all]
+    y = y[has_all]
 
     # get train-test split stratified by class
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=1565)
@@ -361,6 +361,8 @@ def handler(event, context):
     # Integrated gradients
     # TODO:  Again, here I'm assuming binary classification, we'd need to examine each output dimension for multi-class.
     if event.get('igrads', False):
+        all_data_tensors = [torch.tensor(d.values, dtype=torch.float32).T for d in datas]
+        
         baselines = [-torch.rand_like(el)/2 for el in all_data_tensors]
         baselines = [el[:, torch.randperm(el.shape[1])] for el in baselines]
 

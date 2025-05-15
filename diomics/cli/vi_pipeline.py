@@ -341,6 +341,7 @@ def run_pipeline(event, context):
 
         with torch.inference_mode():
             yhat, poe_dist, yhats, dists = joint_model(*list(test_tensors.values()))
+            yhat_train, poe_dist_train, yhats_train, dists_train = joint_model(*list(tensors.values()))
 
         ypred = yhat.argmax(dim=1).numpy()
 
@@ -355,7 +356,8 @@ def run_pipeline(event, context):
         # dump the confusion matrix
         pd.DataFrame(CONFUSION_TEST).to_csv(os.path.join(event['output_dir'], 'confusion_matrix.csv'), index=False)
     
-        ACC_TRAIN = out['train_loss_list'][-1]
+        ypred_train = yhat_train.argmax(dim=1).numpy()
+        ACC_TRAIN = (ypred_train == y_gt.numpy()).mean()
         d = {'Test': [ACC_TEST], 'Train': [ACC_TRAIN]}
 
         pd.DataFrame(d).to_csv(os.path.join(event['output_dir'], 'ACC_TESTRAIN.csv'), index=False)
@@ -388,10 +390,12 @@ def get_shapley(event, joint_model, datas, make_plots = False):
     # compute the shapley values
     shap_values = explainer.shap_values(all_data_tensors, check_additivity=False)
 
+    view_labels = [os.path.splitext(el)[0] for el in event['edata_filenames']]
+
     # make all the plots and dump them to disk
     # TODO:  I am assuming binary classification, for multi-class we need to loop over the first index as well probably
     if make_plots:
-        for k, (tmp_tensor, sv, fname) in enumerate(zip(all_data_tensors, shap_values[0], event['edata_filenames'])):
+        for k, (tmp_tensor, sv, fname) in enumerate(zip(all_data_tensors, shap_values[0], view_labels)):
             fig = plt.gcf()
             shap.summary_plot(sv, features=tmp_tensor, feature_names=datas[k].index, show=False)
             fig.savefig(os.path.join(event['output_dir'], 'shap_summary_plot_{}.png'.format(fname)))
@@ -402,7 +406,7 @@ def get_shapley(event, joint_model, datas, make_plots = False):
 
     out_dataframes_shap = []
 
-    for i, fname in enumerate(event['edata_filenames']):
+    for i, fname in enumerate(view_labels):
         tmp_df = pd.DataFrame({
             'feature': datas[i].iloc[(-abs_shap_values[i]).argsort(), :].index, 
             'shapley_value': sorted_shap_values[i]
@@ -432,7 +436,9 @@ def get_igrads(event, joint_model, datas):
 
     out_dataframes_igrad = []
 
-    for i, fname in enumerate(event['edata_filenames']):
+    view_labels = [os.path.splitext(el)[0] for el in event['edata_filenames']]
+
+    for i, fname in enumerate(view_labels):
         tmp_df = pd.DataFrame({
             'feature': datas[i].iloc[(-abs_igrad_scores[i]).argsort(), :].index, 
             'IGrad_score': sorted_igrad_scores[i]
