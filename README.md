@@ -1,5 +1,9 @@
 # Importance Metrics for Omics with Deep Learning
 
+[DISCLAIMER](./disclaimer.md)
+
+[LICENSE](./license.md)
+
 This repo contains:
 - Scripts and notebooks to run various experiments regarding SHAP values in multi-view, multi-omics deep learning models.
 - A package with model definitions for two multi-view multi-omics models as well as helpers for investigations into importance metrics.
