@@ -45,12 +45,12 @@ example_target = torch.randint(0, 10, (100,))
 
 ```{python}
 # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
-yhat, poe_dist, yhats, dists = joint_model([example_input1, example_input2])
+yhat, poe_dist, yhats, dists = joint_model(example_input1, example_input2)
 ```
 
 ```{python}
 # pass the predictions and distributions to the loss function and update parameters
-loss = joint_model.loss(example_target, yhat, poe_dist, yhats, dists)
+product_loss, var_losses, loss = joint_model.loss(example_target, yhat, poe_dist, yhats, dists)
 loss.backward()
 ```
 
@@ -75,7 +75,7 @@ metab_anova = pd.read_csv("./data/anova_results/metab/anova_results.csv")
 
 ```{python}
 # some samples missing from some datasets.
-lipData.shape, metabData.shape, proData.shape|
+lipData.shape, metabData.shape, proData.shape
 ```
 
 ```{python}
@@ -238,9 +238,9 @@ for i in range(1500):
     views = [lip_tensor, metab_tensor, pro_tensor]
     
     # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
-    # yhat, poe_dist, yhats, dists = joint_vae(views)
+    # yhat, poe_dist, yhats, dists = joint_vae(*views)
 
-    # loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists, var_beta = 0.01)
+    # product_loss, var_losses, loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists, var_beta = 0.01)
 
     # optimizer_vae.zero_grad()
     # loss.backward()
@@ -250,7 +250,7 @@ for i in range(1500):
     # train_acc_vae.append((yhat.argmax(dim=1).numpy() == y_gt.numpy()).mean())
     
     # with torch.inference_mode():
-    #     yhat, poe_dist, yhats, dists = joint_vae([liptest_tensor, metabtest_tensor, protest_tensor])
+    #     yhat, poe_dist, yhats, dists = joint_vae(liptest_tensor, metabtest_tensor, protest_tensor)
 
     # test_acc_vae.append((yhat.argmax(dim=1).numpy() == ytest_gt.to_numpy()).mean())
 
@@ -355,22 +355,22 @@ for i in range(2000):
         views = [v if i != idx else None for i, v in enumerate(views)]
 
     # get the predictions and distribution of the joint model, and the predictions and distributions of the marginal models
-    yhat, poe_dist, yhats, dists = joint_model(views)
+    yhat, poe_dist, yhats, dists = joint_vae(*views)
 
     # pass the predictions and distributions to the loss function and update parameters
-    loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists)
+    product_loss, var_losses, loss = joint_vae.loss(y_gt, yhat, poe_dist, yhats, dists)
 
-    optimizer.zero_grad()
+    optimizer_vae.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(joint_model.parameters(), 2.0)
-    optimizer.step()
+    torch.nn.utils.clip_grad_norm_(joint_vae.parameters(), 2.0)
+    optimizer_vae.step()
 
     print(f'Epoch {i+1} loss: {loss.item():.3f}')
 ```
 
 ```{python}
 # example prediction
-joint_model.eval()
+joint_vae.eval()
 
 ytest_gt = ytest.astype('category').cat.codes
 
@@ -379,7 +379,7 @@ protest_tensor = torch.tensor(test_pro.T.values, dtype=torch.float32)
 metabtest_tensor = torch.tensor(test_metab.T.values, dtype=torch.float32)
 
 with torch.inference_mode():
-    yhat, poe_dist, yhats, dists = joint_model([liptest_tensor, metabtest_tensor, protest_tensor])
+    yhat, poe_dist, yhats, dists = joint_vae(liptest_tensor, metabtest_tensor, protest_tensor)
 
 ypred = yhat.argmax(dim=1).numpy()
 
@@ -561,12 +561,12 @@ metab_baseline = -torch.rand_like(metabtest_pos)/2# *2*metabtest_pos.std().numpy
 ```
 
 ```{python}
-joint_model.eval()
+joint_vae.eval()
 
 lip_int_scores, metab_int_scores, pro_int_scores = integrated_grads(
     [liptest_pos, metabtest_pos, protest_pos], 
     [lip_baseline, metab_baseline, pro_baseline], 
-    joint_model, n_steps = 100, class_idx = 1
+    joint_vae, n_steps = 100, class_idx = 1
 )
 ```
 
@@ -818,9 +818,9 @@ for epoch in range(40):
         loss = 0
         for comb, x in input_dict.items():
             y_gt = gt_dict[comb]
-            yhat, poe_dist, yhats, dists = joint_model(x)
+            yhat, poe_dist, yhats, dists = joint_model(*x)
             # pass alpha and gamma to do focal loss
-            tmp_loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists, alpha = alpha, gamma = gamma)
+            product_loss, var_losses, tmp_loss = joint_model.loss(y_gt, yhat, poe_dist, yhats, dists, alpha = alpha, gamma = gamma)
             loss += tmp_loss
 
         loss.backward()
@@ -847,7 +847,7 @@ for epoch in range(40):
         for comb, x in input_dict.items():
             y_gt = gt_dict[comb]
             with torch.inference_mode():
-                yhat, poe_dist, yhats, dists = joint_model(x)
+                yhat, poe_dist, yhats, dists = joint_model(*x)
             preds = yhat.argmax(axis = 1) == y_gt
             allpreds.extend(preds.tolist())
             all_gt.extend(y_gt.tolist())
@@ -878,7 +878,7 @@ for batch in test_loader:
     for comb, x in input_dict.items():
         y_gt = gt_dict[comb]
         with torch.inference_mode():
-            yhat, poe_dist, yhats, dists = joint_model(x)
+            yhat, poe_dist, yhats, dists = joint_model(*x)
         preds = yhat.argmax(axis = 1)
         all_preds.extend(preds.tolist())
         all_gt.extend(y_gt.tolist())

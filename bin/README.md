@@ -13,10 +13,15 @@ Put these files in a folder of your choice.  The path of this folder will be spe
 
 ## Running Scripts
 
-The experiments are organized via .yaml config files under `bin/cfg`.  These define parameters which are ingested into the experiment scripts via [hydra](https://hydra.cc/docs/intro/), essentially a fancy argparse.  The two immediate files in `bin/cfg` are the base configurations which specify default values.  For example, `bin/noise_experiments.py` is the entrypoint which ingests the config `bin/cfg/config-noise.yaml`.  Arguments can be changed similarly to running a python script, make sure to point the scripts to the folder you put the data in:
+The experiments are organized via .yaml config files under `bin/cfg`.  These define parameters which are ingested into the experiment scripts via [hydra](https://hydra.cc/docs/intro/), essentially a fancy argparse.  The two immediate files in `bin/cfg` are the base configurations which specify default values.  They are ingested by the following scripts:
+
+- `bin/train.py` is the entrypoint for performing standard evaluation on the effect of architecture differences on performance.  It ingests the config file `bin/cfg/config.yaml`
+- `bin/noise_experiments.py` Performs the exeriments regarding the effect of random noise on SHAP values and ingests the config `bin/cfg/config-noise.yaml`.  
+
+Arguments can be changed similarly to running a python script, make sure to point the scripts to the folder you put the data in:
 
 ```bash
-# in base project directory
+# in base project directory, possibly necessary if the package was not installed
 export PYTHONPATH=.
 
 # use default values in bin/cfg/config-noise.yaml
@@ -83,13 +88,13 @@ Clicking on a run will allow you to browse its results and artifacts (outputs li
 
 We had two main experiments, one that measured performance across architectures with different layer sizes, and either mean or concatentation
 
-- Performance differences between concat/mean combination and layer sizes
+- Performance differences between concat/mean combination and layer sizes (using entrypoint `bin/train.py`)
     - `concat-binary.yaml`:  Different layer sizes with a concatenation scheme on the binary ICL104 dataset
     - `concat-multiclass.yaml`:  Different layer sizes with a concatenation combination scheme on the multiclass ICL102 dataset 
     - `mean-binary.yaml`:  Different layer sizes with a mean combination scheme on the binary ICL104 dataset.
     - `mean-multiclass.yaml`:  Different layer sizes with a mean combination scheme on the binary ICL104 dataset
 
-- Variation in SHAP values due to added noise and layer size differences, with 10 runs per sweep parameter. ICL 104 only.
+- Variation in SHAP values due to added noise and layer size differences, with 10 runs per sweep parameter. ICL 104 only. (using entrypoint `bin/noise_experiments.py`)
     - `noise-sweep-binary-3view.yaml`:  Collects SHAP values using all 3 views (metabolites, lipids, proteomics), with metabolites receiving all augmented noise.
     - `noise-sweep-binary-metab-v-lip/noise-sweep-binary-metab-v-lip-2` SHAP values for a network with metabolites and lipids using two different layer size adjustment schemes
     - `noise-sweep.yaml`:  Base experiment with metabolites and proteins

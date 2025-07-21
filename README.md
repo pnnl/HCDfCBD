@@ -14,7 +14,7 @@ Includes a pytorch rewrite of:  Lee, C. & van der Schaar, M. A Variational Infor
 Dependencies are maintained using [uv](https://docs.astral.sh/uv/) in `pyproject.toml`, `uv.lock` and `requirements.txt`.  
 
 ### Using uv (recommended)
-Install dependencies using uv, which provides faster package resolution and installation:
+Install dependencies using uv, which provides faster package resolution and installation.
 
 ```bash
 # Install uv if you haven't already
@@ -26,10 +26,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Create a virtual environment and install dependencies
 uv sync
+
+# install all extra dependencies, e.g. for running experiments
+uv sync --all-extras
+
+# activate the environment
+source .venv/bin/activate
 ```
 
+See [this section](https://docs.astral.sh/uv/pip/environments/) of the `uv` docs for how to work with python environments with uv, including how to install to a different environment (e.g. conda).
+
 ### Using pip
-Alternatively, install in a virtual environment/conda environment with:
+Alternatively, install in a virtual environment/conda environment with the below commands.  Note that all of these can be prepended with `uv` to use uv in the installation (.e.g `uv pip install -e .`).
 
 ```bash
 # from pyproject.toml
@@ -42,6 +50,7 @@ pip install -e .[experiments]
 pip install -r requirements.txt
 ```
 
+### Quarto Notebooks
 The notebooks are in quarto (.qmd) format.  Install quarto from their website https://quarto.org/docs/get-started/.  VSCode has a quarto plugin that allows you to run code chunks from a .qmd document in an interactive window.  Quarto can also convert .qmd to .ipynb from the command line with e.g. `quarto convert myfile.qmd`.
 
 ## Ablation Experiments

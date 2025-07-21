@@ -22,3 +22,6 @@ experiments = [
 
 [tool.setuptools.packages.find]
 include = ["diomics*"] 
+
+[tool.uv]
+package = true
