@@ -10,7 +10,7 @@ docker build -t diomics:latest .
 Once the image is built, you can test it locally by running and pinging a container.  First, we run the container, mounting the data folder to the container's `/var/task/data` folder, and exposing port 9000 mapping to the container's port 8080.
 
 ```bash
-docker run -p 9000:8080 -v /Users/clab683/git_repos/DeepIMV/data:/var/task/data diomics:latest
+docker run -p 9000:8080 -v ~/git_repos/DeepIMV/data:/var/task/data diomics:latest
 ```
 
 The mounted data folder must contain the data files that will be used for training and testing.  The folder structure looks like:

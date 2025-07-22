@@ -5,7 +5,7 @@ Helper functions to load curated datasets for experiments.  Here it is ICL104 an
 import pandas as pd
 import os
 
-def load_icl102_multiclass(base_path = "/Users/clab683/git_repos/DeepIMV/data/ICL104-MAR2024"):
+def load_icl102_multiclass(base_path = "~/git_repos/DeepIMV/data/ICL104-MAR2024"):
     train_lip = pd.read_csv(os.path.join(base_path, "lip_neg_train.csv"))
     test_lip = pd.read_csv(os.path.join(base_path, "lip_neg_test.csv"))
 
@@ -49,7 +49,7 @@ def load_icl102_multiclass(base_path = "/Users/clab683/git_repos/DeepIMV/data/IC
 
     return out_dict
 
-def load_icl104_binary(base_path = "/Users/clab683/git_repos/DeepIMV/data/ICL104-binary"):
+def load_icl104_binary(base_path = "~/git_repos/DeepIMV/data/ICL104-binary"):
     # proData = pd.read_csv(os.path.join(base_path, 'pro_edata_mlready.csv'))
     # lipData = pd.read_csv(os.path.join(base_path, 'lip_edata_mlready.csv'))
     # metabData = pd.read_csv(os.path.join(base_path, 'metab_edata_mlready.csv'))

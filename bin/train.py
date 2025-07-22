@@ -553,7 +553,7 @@ def main(cfg : DictConfig) -> None:
 
     args['activation_fn'] = hydra.utils.instantiate(args['activation_fn'])
 
-    # mlflow.set_tracking_uri("file:///Users/clab683/git_repos/DeepIMV/mlruns")
+    # mlflow.set_tracking_uri("file://~/git_repos/DeepIMV/mlruns")
     exp_id = mlflow.set_experiment(experiment_name=args['experiment_name'])
 
     print(mlflow.get_tracking_uri())

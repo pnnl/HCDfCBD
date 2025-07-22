@@ -58,19 +58,19 @@ tumor_list = [
 'UCS',
 'UVM']
 
-rnaseq_dir = "/Users/clab683/Data/tcga/rnaseq"
+rnaseq_dir = "~/Data/tcga/rnaseq"
 os.makedirs(rnaseq_dir, exist_ok=True)
 
-rppa_dir = "/Users/clab683/Data/tcga/RPPA"
+rppa_dir = "~/Data/tcga/RPPA"
 os.makedirs(rppa_dir, exist_ok=True)
 
-mirna_dir = "/Users/clab683/Data/tcga/miRNA"
+mirna_dir = "~/Data/tcga/miRNA"
 os.makedirs(mirna_dir, exist_ok=True)
 
-methyl_dir = "/Users/clab683/Data/tcga/methylation"
+methyl_dir = "~/Data/tcga/methylation"
 os.makedirs(methyl_dir, exist_ok=True)
 
-labels_dir = os.path.join("/Users/clab683/Data/tcga/clinical_labels/")
+labels_dir = os.path.join("~/Data/tcga/clinical_labels/")
 os.makedirs(labels_dir, exist_ok=True)
 ```
 
@@ -612,7 +612,7 @@ dfy = pd.merge(df, label[['Hybridization REF','1yr-mortality']], how='left', on=
 
 ```{python}
 np.savez(
-    '/Users/clab683/Documents/Data/tcga/multi_omics_1yr_mortality.npz',
+    '~/Documents/Data/tcga/multi_omics_1yr_mortality.npz',
     mRNAseq     = np.asarray(df1.iloc[:, 1:]),
     Methylation = np.asarray(df2.iloc[:, 1:]),
     miRNAseq    = np.asarray(df3.iloc[:, 1:]),

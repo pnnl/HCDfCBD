@@ -481,9 +481,9 @@ metabolites_igrad_out = metabolites_igrad.merge(metab_igrad_scores_df, how = 'le
 ```{python}
 thetime = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
-proteins_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-proteins-{thetime}.csv", index=False)
-lipids_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-lipids-{thetime}.csv", index=False)
-metabolites_igrad_out.to_csv(f"/Users/clab683/git_repos/DeepIMV/output/igrads-notebook-metabolites-{thetime}.csv", index=False)
+proteins_igrad_out.to_csv(f"~/git_repos/DeepIMV/output/igrads-notebook-proteins-{thetime}.csv", index=False)
+lipids_igrad_out.to_csv(f"~/git_repos/DeepIMV/output/igrads-notebook-lipids-{thetime}.csv", index=False)
+metabolites_igrad_out.to_csv(f"~/git_repos/DeepIMV/output/igrads-notebook-metabolites-{thetime}.csv", index=False)
 ```
 
 ### Integrated Gradient Plots

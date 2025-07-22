@@ -1,2 +1,2 @@
 _target_: diomics.experiments.data.load_icl104_binary
-base_path: "/Users/clab683/git_repos/DeepIMV/data/ICL104-binary"  
+base_path: "~/git_repos/DeepIMV/data/ICL104-binary"  

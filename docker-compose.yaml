@@ -6,7 +6,7 @@ services:
         ports:
             - "9000:8080"
         volumes:
-            - "/Users/clab683/git_repos/DeepIMV/data:/var/task/data"
+            - "~/git_repos/DeepIMV/data:/var/task/data"
     minio:
         profiles: ["minio"]
         image: minio/minio

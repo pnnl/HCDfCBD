@@ -46,7 +46,7 @@ tumor_list = [
 'UVM']
 
 orgi_wd = os.getcwd()
-out_dir = "/Users/clab683/Data/tcga/"
+out_dir = "~/Data/tcga/"
 os.chdir(out_dir)
 
 try:

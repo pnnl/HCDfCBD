@@ -16,8 +16,6 @@ from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import StratifiedShuffleSplit
 
 import matplotlib.pyplot as plt
-
-import argparse
 from tqdm import tqdm
 
 logger = logging.getLogger()
@@ -192,8 +190,44 @@ def naive_preprocess(datas, fmeta, event):
 
 def run_pipeline(event, context, splits=None):
     """A function to run training and variable importance for the multi-mlp model, with arguments formatted for an AWS lambda.
+    
+    Args:
+        event (dict): A dictionary containing the pipeline configuration parameters with the following keys:
+            do_train (bool): Whether to train the model from scratch. Default: False
+            do_eval (bool): Whether to evaluate the model. Default: False
+            data_dir (str): The path to the folder containing your fmeta and edata files. Default: 'data'
+            fmeta_file_name (str): Name of the file containing the metadata. Default: 'fmeta.csv'
+            fmeta_sample_names (list): Names of columns in fmeta.csv that correspond to the sample IDs 
+                in each of the edata files. Default: ['SampleID_metab', 'SampleID_proteomics', 'SampleID_lipidpos']
+            fmeta_target_name (str): Name of the column in fmeta.csv that contains the target variable. Default: 'Virus'
+            edata_filenames (list): Filenames of the edata files. Default: ['OMICS_ICL104_Metabolomics_YMK.csv', 
+                'ICL104_lipids_aligned_for_stats.csv', 'ICL104_proteins_luke.csv']
+            edata_cnames (list): Names of the columns in the edata files that contain the biomolecule names. 
+                Default: ['Metabolite', 'Name', 'Protein']
+            preprocess (bool): Apply a naive preprocessing step which median normalizes and mean-imputes the data. 
+                Also removes samples which do not exist across all data types. Default: False
+            shapley (bool): Whether to compute SHAPley values and plot the result. Default: False
+            igrads (bool): Whether to compute integrated gradients and plot the result. Default: False
+            output_dir (str): Directory to save the output files. Default: 'data/output'
+            best_model_path (str): Path to save the best model during training (used for early stopping). 
+                Default: 'data/best_model.pt'
+            final_model_path (str): Path to save/load the final model. Default: 'data/final_model.pt'
+            patience (int): Number of validation steps to wait for improvement in validation loss before 
+                stopping training. Default: 10
+            validation_frequency (int): Number of training steps between validation steps. Default: 100
+            max_iter (int): Maximum number of training iterations. Default: 5000
+            
+        context: AWS lambda context object (unused in this implementation)
+        splits (dict, optional): Optional dictionary containing predefined train/test/validation splits with keys:
+            'train', 'valid', 'test' containing arrays of indices. If None, splits are generated automatically
+            using stratified sampling.
+            
+    Returns:
+        dict: A dictionary containing the pipeline results including trained models, accuracy metrics,
+              and feature importance scores (if requested).
     """
     logging.info("event: %s", event)
+    
     os.makedirs(event['output_dir'], exist_ok=True)
 
     out_dict = {}

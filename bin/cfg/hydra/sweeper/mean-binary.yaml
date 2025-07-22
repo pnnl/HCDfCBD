@@ -11,5 +11,5 @@ params:
     [[64, 8], [124, 8], [1077, 8]]"
   combine_fn: "mean"
   hidden_dim: 64, 32, 16
-  data_dir: /Users/clab683/git_repos/DeepIMV/data/ICL104-binary
+  data_dir: ~/git_repos/DeepIMV/data/ICL104-binary
   experiment_name: icl-binary

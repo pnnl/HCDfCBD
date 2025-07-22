@@ -44,26 +44,26 @@ import pickle
 ## Load ICL-104
 
 ```{python}
-proData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_edata_mlready.csv')
-lipData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_edata_mlready.csv')
-metabData = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_edata_mlready.csv')
+proData = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/pro_edata_mlready.csv')
+lipData = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/lip_edata_mlready.csv')
+metabData = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/metab_edata_mlready.csv')
 
-pro_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_fdata_mlready.csv')
-lip_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_fdata_mlready.csv')
-metab_fdata = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_fdata_mlready.csv')
+pro_fdata = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/pro_fdata_mlready.csv')
+lip_fdata = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/lip_fdata_mlready.csv')
+metab_fdata = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/metab_fdata_mlready.csv')
 
 lipData.shape, metabData.shape, proData.shape
 ```
 
 ```{python}
-train_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_train.csv')
-test_lip = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/lip_neg_test.csv')
+train_lip = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/lip_neg_train.csv')
+test_lip = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/lip_neg_test.csv')
 
-train_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_train.csv')
-test_metab = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/metab_test.csv')
+train_metab = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/metab_train.csv')
+test_metab = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/metab_test.csv')
 
-train_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_train.csv')
-test_pro = pd.read_csv('/Users/clab683/git_repos/DeepIMV/data/ICL104-binary/pro_test.csv')
+train_pro = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/pro_train.csv')
+test_pro = pd.read_csv('~/git_repos/DeepIMV/data/ICL104-binary/pro_test.csv')
 
 ytrain = train_lip['y']
 ytest = test_lip['y']
@@ -524,16 +524,16 @@ results = compare_shap_scores(train_metab, train_pro, ytrain, noise_levels=[50, 
 ```
 
 ```{python}
-pickle.dump(results, open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'wb'))
+pickle.dump(results, open("~/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'wb'))
 ```
 
 ```{python}
-pickle.dump(results, open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'wb'))
+pickle.dump(results, open("~/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'wb'))
 ```
 
 ```{python}
-results_orig = pickle.load(open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'rb'))
-results_50_5000 = pickle.load(open("/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'rb'))
+results_orig = pickle.load(open("~/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results.pkl", 'rb'))
+results_50_5000 = pickle.load(open("~/git_repos/DeepIMV/output/layer_size_experiments/noise_level_results_50_5000.pkl", 'rb'))
 
 # combine these two dictionaries
 results = {**results_orig, **results_50_5000}
@@ -602,7 +602,7 @@ ax.set_ylabel('Weighted Tau')
 fig.tight_layout()
 plt.show()
 
-fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/tau_v_noise.png', dpi = 300)
+fig.savefig('~/git_repos/DeepIMV/output/layer_size_experiments/images/tau_v_noise.png', dpi = 300)
 ```
 
 ```{python}
@@ -665,7 +665,7 @@ fig.tight_layout()
 
 plt.show()
 
-fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/shap_ratio_v_noise.png', dpi = 300)
+fig.savefig('~/git_repos/DeepIMV/output/layer_size_experiments/images/shap_ratio_v_noise.png', dpi = 300)
 ```
 
 ```{python}
@@ -678,7 +678,7 @@ ax.set_ylabel('Shapley Magnitude')
 fig.tight_layout()
 plt.show()
 
-fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/shap_mag_v_noise.png', dpi = 300)
+fig.savefig('~/git_repos/DeepIMV/output/layer_size_experiments/images/shap_mag_v_noise.png', dpi = 300)
 ```
 
 ```{python}
@@ -1210,12 +1210,12 @@ results_squeeze = compare_shap_scores(
 
 thetime = datetime.datetime.now().strftime("%Y-%m-%d")
 
-pickle.dump(results_squeeze, open(f"/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_{thetime}.pkl", 'wb'))
+pickle.dump(results_squeeze, open(f"~/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_{thetime}.pkl", 'wb'))
 ```
 
 ```{python}
 # plot the data, optionally load previous results
-results_squeeze = pickle.load(open('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_2024-10-15.pkl', 'rb'))
+results_squeeze = pickle.load(open('~/git_repos/DeepIMV/output/layer_size_experiments/squeeze_tau_results_2024-10-15.pkl', 'rb'))
 
 tau_squeeze, shap_squeeze = collect_results(results_squeeze)
 
@@ -1238,7 +1238,7 @@ ax.set_xlabel('Number of noise features, multiplier')
 # rotate
 fig.tight_layout()
 
-fig.savefig('/Users/clab683/git_repos/DeepIMV/output/layer_size_experiments/images/fixed_vs_variable_layer_tau.png', dpi = 300)
+fig.savefig('~/git_repos/DeepIMV/output/layer_size_experiments/images/fixed_vs_variable_layer_tau.png', dpi = 300)
 ```
 
 ```{python}

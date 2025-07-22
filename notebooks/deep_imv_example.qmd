@@ -701,7 +701,7 @@ TCGA gene expression data.  The labels are the 1 year mortality status of the pa
 
 ```{python}
 # load pre-processed tcga data
-tcgadata = np.load('/Users/clab683/Documents/Data/tcga/multi_omics_1yr_mortality.npz')
+tcgadata = np.load('~/Documents/Data/tcga/multi_omics_1yr_mortality.npz')
 ```
 
 ```{python}
