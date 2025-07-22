@@ -190,11 +190,10 @@ def naive_preprocess(datas, fmeta, event):
 
     return datas, y
 
-def run_pipeline(event, context):
+def run_pipeline(event, context, splits=None):
     """A function to run training and variable importance for the multi-mlp model, with arguments formatted for an AWS lambda.
     """
     logging.info("event: %s", event)
-
     os.makedirs(event['output_dir'], exist_ok=True)
 
     out_dict = {}
@@ -237,15 +236,20 @@ def run_pipeline(event, context):
         _ = subset_fmeta(fmeta, datas, event, inplace = False)
         y = fmeta[event['fmeta_target_name']]
 
-    # get train-test split stratified by class
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=1565)
-    valid_splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=1555)
+    if splits is None:
+        # get train-test split stratified by class
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.4, random_state=1565)
+        valid_splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.5, random_state=1555)
 
-    train_inds, test_inds = next(splitter.split(np.zeros(y.shape), y))
-    test_inds_new, valid_inds = next(valid_splitter.split(np.zeros(y.iloc[test_inds].shape), y.iloc[test_inds]))
+        train_inds, test_inds = next(splitter.split(np.zeros(y.shape), y))
+        test_inds_new, valid_inds = next(valid_splitter.split(np.zeros(y.iloc[test_inds].shape), y.iloc[test_inds]))
 
-    valid_inds = test_inds[valid_inds]
-    test_inds = test_inds[test_inds_new]
+        valid_inds = test_inds[valid_inds]
+        test_inds = test_inds[test_inds_new]
+    else:
+        train_inds = splits['train']
+        valid_inds = splits['valid']
+        test_inds = splits['test']
 
     train_splits = {}
     valid_splits = {}
